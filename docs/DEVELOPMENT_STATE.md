@@ -120,6 +120,35 @@ Problem, stack, sync model, IA, schema, ingestion, resume, layouts, roadmap, ris
 
 ---
 
+## Environment finding (2026-08-13, re-tested)
+
+A session believed to be running on the user's Windows PC was re-tested and is **still the hosted
+Claude Code environment**, not a local machine:
+
+```
+uname            Linux 6.18.5-fc-v20 x86_64      hostname  vm      user  root
+cwd              /home/user/anthropic-claude-code
+/mnt/c           absent  -> not WSL on a Windows PC
+```
+
+Egress from it is selective, which is why some steps succeed and others cannot:
+
+| Host | Result |
+|---|---|
+| `github.com`, `api.github.com` | reachable |
+| `registry.npmjs.org` | reachable |
+| `supabase.com`, `api.supabase.com`, `*.supabase.co` | **blocked** |
+| `vercel.com`, `api.vercel.com` | **blocked** |
+
+GitHub *reads* work through the proxy; GitHub **repository-settings writes do not** — a
+`PATCH /repos/{owner}/{repo}` to set the default branch returns
+`403 Repository settings writes are not permitted through this proxy.`
+
+Consequence: Supabase migration/validation and Vercel deployment cannot be performed from
+Claude Code on the web at all. They require the Claude Code **CLI running locally** on the user's
+own machine (where this repo, the same commands, and the same test harnesses all work unchanged),
+or an environment whose network policy permits those hosts.
+
 ## The hosted-access blocker, precisely
 
 Two independent barriers, both verified this session rather than assumed:

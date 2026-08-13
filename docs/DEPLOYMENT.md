@@ -246,6 +246,25 @@ confirm the deployed project matches:
 
 ---
 
+## Which environment can do what
+
+Not every environment can complete setup. Verified 2026-08-13:
+
+| Task | Claude Code on the web | Claude Code CLI, run locally |
+|---|---|---|
+| Build, typecheck, lint, unit tests | yes | yes |
+| `npm run test:db` (ephemeral Postgres) | yes | yes (needs local PostgreSQL 16) |
+| `npm run test:responsive` (unauthenticated) | yes | yes |
+| Git push to GitHub | yes | yes |
+| Set the GitHub **default branch** | no — proxy blocks repo-settings writes | yes |
+| `supabase login / link / db push / db diff` | no — `*.supabase.co` blocked | yes |
+| Hosted schema + RLS validation | no | yes |
+| Vercel deploy | no — `vercel.com` blocked | yes |
+
+The web environment is fine for building and validating ContextShelf. **Provisioning it against
+the hosted project requires the local CLI**, because those hosts are outside its egress policy.
+Install with `npm i -g @anthropic-ai/claude-code`, then run `claude` from a clone of this repo.
+
 ## Local development
 
 ```bash
