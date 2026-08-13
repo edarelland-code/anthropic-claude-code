@@ -14,7 +14,8 @@
     "db:push": "supabase db push",
     "db:types": "supabase gen types typescript --linked > src/lib/adapters/supabase/database.types.ts",
     "test:db": "bash scripts/db-test.sh",
-    "test:responsive": "node scripts/responsive-qa.mjs"
+    "test:responsive": "node scripts/responsive-qa.mjs",
+    "provision": "node scripts/provision.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.4",

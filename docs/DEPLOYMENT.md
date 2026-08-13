@@ -105,6 +105,28 @@ that buys nothing here.)
 4. Set the **Production Branch** to `main`.
 5. Deploy. Note the URL — that is the ContextShelf URL you open everywhere.
 
+## 3a. One command for the whole hosted sequence
+
+From any environment that can reach Supabase (your own machine — not Claude Code on the web):
+
+```
+npm run provision
+```
+
+`scripts/provision.mjs` runs the entire remaining hosted sequence and stops at the first real
+failure: preflight (network reachability, `.env.local`) → `supabase login` → `link` → `db push` →
+`db diff --linked` → `hosted/01_verify_schema.sql` → `hosted/02_rls_isolation.sql`.
+
+It is plain Node, so it works in PowerShell, cmd, and any POSIX shell. Interactive steps hand the
+terminal to the Supabase CLI, so the browser login and the database-password prompt are handled by
+the CLI directly — the script never reads, stores, or echoes a credential.
+
+Flags: `--skip-login`, `--skip-push` (validate only), `--project-ref <ref>`.
+
+The preflight distinguishes a blocked host from an unreachable one. An egress gateway completes
+the TLS handshake and then answers the request itself, so "the socket opened" is not evidence of
+reachability — the check reads the response body and names an allowlist rejection as such.
+
 ## 4a. Applying the migration when the CLI is unavailable
 
 The CLI is the preferred path — it records migration history. If it cannot run (for example from a
@@ -134,6 +156,15 @@ reads catalogs, the second runs inside a transaction that is rolled back.
 
 Both are smoke-tested against a real PostgreSQL by `npm run test:db`, so they are known to run
 before they touch production.
+
+`npm run provision` runs both automatically. To run one on its own:
+
+```
+npx supabase db query --linked -f supabase/tests/hosted/01_verify_schema.sql
+```
+
+`supabase db query --linked -f <file>` exists in CLI 2.114.0 (confirmed against the installed
+binary's help). The SQL Editor is therefore a convenience, not a requirement.
 
 ## 5. Point Supabase at that URL **[you]**
 
