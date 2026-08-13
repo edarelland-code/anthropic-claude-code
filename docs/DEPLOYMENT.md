@@ -206,7 +206,7 @@ Run these in order. Each is a Phase 1 exit criterion.
 
 ### The cross-device test (the acceptance test)
 
-**Device A — Mac**
+**Device A — whichever machine you are at now (Windows PC or Mac)**
 
 1. Open the production URL, sign in.
 2. Create topic `DailyRelay`.
@@ -214,7 +214,7 @@ Run these in order. Each is a Phase 1 exit criterion.
 4. Add three knowledge entries with different types and different Source values.
 5. Add a next step. Edit Goal and Current State.
 
-**Device B — Windows PC**
+**Device B — the other machine (or a phone)**
 
 6. Open the same URL. Sign in with the same email.
 7. Confirm everything from steps 2–5 is present. **No export or import.**
@@ -246,6 +246,26 @@ confirm the deployed project matches:
 
 ---
 
+## Running the provisioning steps on Windows
+
+The commands in this document are shell-agnostic except where noted. On Windows, run them in
+**PowerShell** from the repository folder. Three differences matter:
+
+| | macOS / Linux | Windows PowerShell |
+|---|---|---|
+| Set an env var for one command | `FOO=bar cmd` | `$env:FOO="bar"; cmd` |
+| Copy the env template | `cp .env.example .env.local` | `Copy-Item .env.example .env.local` |
+| `npm run test:db` | works (needs PostgreSQL 16) | **not supported** — the harness is a bash script |
+
+`npm run test:db` uses `scripts/db-test.sh`, which needs bash plus the PostgreSQL 16 server
+binaries. On Windows run it under **WSL** or **Git Bash** with PostgreSQL installed, or skip it —
+it validates the migration locally and is not required for provisioning the hosted project. The
+hosted scripts in `supabase/tests/hosted/` are the ones that matter against the real project, and
+those run through the Supabase SQL Editor or the CLI regardless of operating system.
+
+Everything else — `npm run build`, `typecheck`, `lint`, `test`, `test:responsive`, the whole
+`supabase` CLI sequence, and the Vercel CLI — works identically on Windows.
+
 ## Which environment can do what
 
 Not every environment can complete setup. Verified 2026-08-13:
@@ -263,7 +283,18 @@ Not every environment can complete setup. Verified 2026-08-13:
 
 The web environment is fine for building and validating ContextShelf. **Provisioning it against
 the hosted project requires the local CLI**, because those hosts are outside its egress policy.
-Install with `npm i -g @anthropic-ai/claude-code`, then run `claude` from a clone of this repo.
+
+Claude Code on the web runs the agent in Anthropic's cloud, on Linux — not on the machine whose
+browser you are using. It cannot see your `C:` drive, your local clone, or your local `.env.local`,
+and it cannot reach Supabase or Vercel. To have the agent work on your own machine, install the
+CLI there:
+
+```powershell
+npm install -g @anthropic-ai/claude-code
+git clone https://github.com/edarelland-code/anthropic-claude-code
+cd anthropic-claude-code
+claude
+```
 
 ## Local development
 
