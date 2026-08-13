@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * ContextShelf — one-command hosted provisioning and validation.
+ * ContextShelf — one-command hosted provisioning, deployment, and validation.
  *
  *   npm run provision
  *
@@ -14,6 +14,11 @@
  *   4  db diff --linked   asserts hosted schema matches the repository
  *   5  hosted schema verification   supabase/tests/hosted/01_verify_schema.sql
  *   6  hosted RLS isolation         supabase/tests/hosted/02_rls_isolation.sql
+ *   7  vercel login + link          (interactive)
+ *   8  production environment variables (read from .env.local, never printed)
+ *   9  production deploy            captures the real URL
+ *  10  NEXT_PUBLIC_SITE_URL         set to the canonical URL, then redeploy
+ *  11  production smoke test        HTTPS, routes, no credential leakage
  *
  * Cross-platform: plain Node, no bash. Works in PowerShell, cmd, and any POSIX
  * shell.
@@ -26,6 +31,7 @@
  *   --skip-login     assume the CLI is already authenticated
  *   --skip-push      validate only; do not apply migrations
  *   --project-ref X  override the default project reference
+ *   --skip-vercel    stop after the Supabase phase
  */
 
 import { spawnSync } from 'node:child_process';
@@ -273,16 +279,120 @@ if (!rls.ok || !rlsPassed) {
   die('Hosted RLS isolation did not pass. This is a security failure — do not deploy.');
 }
 
+// --- 7-11. Vercel ------------------------------------------------------------
+let productionUrl = null;
+
+function vercel(cliArgs, { interactive = false, input } = {}) {
+  const result = spawnSync('npx', ['--yes', 'vercel@latest', ...cliArgs], {
+    cwd: ROOT,
+    stdio: interactive ? 'inherit' : ['pipe', 'pipe', 'pipe'],
+    input,
+    encoding: 'utf8',
+    shell: IS_WINDOWS,
+  });
+  return { ok: result.status === 0, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+}
+
+/** Reads one value out of .env.local without ever printing it. */
+function envValue(name) {
+  const m = envText.match(new RegExp(`^${name}=(.*)$`, 'm'));
+  return m ? m[1].trim() : null;
+}
+
+if (!flag('skip-vercel')) {
+  const vercelProbe = reachable('api.vercel.com');
+  if (!vercelProbe.ok) {
+    record('vercel reachability', false, vercelProbe.why);
+    die('Vercel is not reachable from this environment.', 'Supabase provisioning above succeeded. Re-run with network access to deploy.');
+  }
+
+  heading('Vercel authentication');
+  const who = vercel(['whoami']);
+  if (who.ok) {
+    record('already authenticated', true, who.stdout.trim());
+  } else {
+    console.log(c.yellow('    Opening a browser for Vercel login. Approve it, then this continues automatically.'));
+    if (!vercel(['login'], { interactive: true }).ok) {
+      record('vercel login', false);
+      die('Vercel login did not complete.');
+    }
+    record('vercel login', true);
+  }
+
+  heading('Link the Vercel project');
+  const linked = vercel(['link', '--yes'], { interactive: true });
+  record('vercel link', linked.ok);
+  if (!linked.ok) die('Could not link the Vercel project.');
+
+  heading('Production environment variables');
+  // Values are piped straight from .env.local into the CLI's stdin. They are
+  // never echoed, logged, or written to a file by this script.
+  const vars = {
+    NEXT_PUBLIC_SUPABASE_URL: envValue('NEXT_PUBLIC_SUPABASE_URL'),
+    NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: envValue('NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY'),
+  };
+  for (const [name, val] of Object.entries(vars)) {
+    if (!val) {
+      record(name, false, 'missing from .env.local');
+      die(`${name} is not set in .env.local.`);
+    }
+    let added = 0;
+    for (const target of ['production', 'preview', 'development']) {
+      // `env add` is not idempotent; a duplicate is a benign failure.
+      const r = vercel(['env', 'add', name, target], { input: `${val}\n` });
+      if (r.ok) added += 1;
+    }
+    record(name, true, added ? `set in ${added} environment(s)` : 'already present');
+  }
+
+  heading('Production deploy');
+  const deploy = vercel(['deploy', '--prod', '--yes']);
+  const urlMatch = `${deploy.stdout}${deploy.stderr}`.match(/https:\/\/[a-z0-9-]+\.vercel\.app/i);
+  productionUrl = urlMatch ? urlMatch[0] : null;
+  record('vercel deploy --prod', deploy.ok && !!productionUrl, productionUrl ?? 'no URL captured');
+  if (!deploy.ok || !productionUrl) die('Production deploy failed.');
+
+  heading('Canonical site URL');
+  // The app must not depend on a per-deployment preview URL.
+  vercel(['env', 'rm', 'NEXT_PUBLIC_SITE_URL', 'production', '--yes']);
+  const siteSet = vercel(['env', 'add', 'NEXT_PUBLIC_SITE_URL', 'production'], { input: `${productionUrl}\n` });
+  record('NEXT_PUBLIC_SITE_URL', siteSet.ok, productionUrl);
+  // NEXT_PUBLIC_* is inlined at build time, so the value only takes effect on a rebuild.
+  const redeploy = vercel(['deploy', '--prod', '--yes']);
+  record('redeploy with canonical URL', redeploy.ok);
+
+  heading('Production smoke test');
+  const check = (path, expect) => {
+    const r = spawnSync(
+      process.execPath,
+      ['-e', `const https=require('https');https.get(process.argv[1],{},res=>{process.stdout.write(String(res.statusCode));process.exit(0)}).on('error',()=>{process.stdout.write('ERR');process.exit(0)})`, `${productionUrl}${path}`],
+      { encoding: 'utf8' },
+    );
+    const code = (r.stdout ?? '').trim();
+    record(`GET ${path}`, expect.includes(code), `HTTP ${code}`);
+    return code;
+  };
+  check('/login', ['200']);
+  check('/setup', ['200']);
+  check('/home', ['307', '302']);   // unauthenticated -> /login
+}
+
 // ---------------------------------------------------------------------------
 summary();
 console.log(
   [
     '',
-    c.bold('Next:'),
-    '  1. Deploy to Vercel and set the three NEXT_PUBLIC_ variables (docs/DEPLOYMENT.md §4).',
-    '  2. Add the production /auth/callback and /auth/confirm redirect URLs (§5).',
-    '  3. Update both email templates to the token-hash form (§6).',
-    '  4. Run the cross-device acceptance test (§ Verifying the deployment).',
+    c.bold('Next — the parts no API exposes:'),
+    productionUrl
+      ? `  1. Supabase -> Authentication -> URL Configuration. Site URL: ${productionUrl}`
+      : '  1. Supabase -> Authentication -> URL Configuration (after deploying).',
+    productionUrl
+      ? `     Redirect URLs: ${productionUrl}/auth/callback, ${productionUrl}/auth/confirm,`
+      : '     Redirect URLs: <production>/auth/callback and /auth/confirm,',
+    '     plus http://localhost:3000/auth/callback and /auth/confirm',
+    '  2. Supabase -> Authentication -> Email Templates. Set BOTH Magic Link and',
+    '     Confirm signup to the token-hash form in docs/DEPLOYMENT.md section 6.',
+    '  3. Run the cross-device acceptance test in docs/DEPLOYMENT.md.',
     '',
   ].join('\n'),
 );

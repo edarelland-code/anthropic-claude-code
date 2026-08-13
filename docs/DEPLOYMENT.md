@@ -113,15 +113,29 @@ From any environment that can reach Supabase (your own machine — not Claude Co
 npm run provision
 ```
 
-`scripts/provision.mjs` runs the entire remaining hosted sequence and stops at the first real
-failure: preflight (network reachability, `.env.local`) → `supabase login` → `link` → `db push` →
-`db diff --linked` → `hosted/01_verify_schema.sql` → `hosted/02_rls_isolation.sql`.
+`scripts/provision.mjs` runs the entire remaining Phase 1 sequence and stops at the first real
+failure:
+
+**Supabase** — preflight (network reachability, `.env.local`) → `supabase login` → `link` →
+`db push` → `db diff --linked` → `hosted/01_verify_schema.sql` → `hosted/02_rls_isolation.sql`
+
+**Vercel** — `vercel login` → `link` → production/preview/development environment variables →
+`deploy --prod` → capture the real URL → set `NEXT_PUBLIC_SITE_URL` to it → redeploy → smoke-test
+`/login`, `/setup`, and `/home`
+
+Environment values are piped from `.env.local` straight into the Vercel CLI's stdin; they are never
+echoed, logged, or written anywhere by the script. `NEXT_PUBLIC_SITE_URL` is set to the canonical
+production URL rather than a per-deployment preview URL, and the redeploy exists because
+`NEXT_PUBLIC_*` values are inlined at build time.
+
+Only two things are left afterwards, because Supabase exposes no API for them: the auth redirect
+URLs and the two email templates. The script prints both, filled in with your real production URL.
 
 It is plain Node, so it works in PowerShell, cmd, and any POSIX shell. Interactive steps hand the
 terminal to the Supabase CLI, so the browser login and the database-password prompt are handled by
 the CLI directly — the script never reads, stores, or echoes a credential.
 
-Flags: `--skip-login`, `--skip-push` (validate only), `--project-ref <ref>`.
+Flags: `--skip-login`, `--skip-push` (validate only), `--skip-vercel`, `--project-ref <ref>`.
 
 The preflight distinguishes a blocked host from an unreachable one. An egress gateway completes
 the TLS handshake and then answers the request itself, so "the socket opened" is not evidence of
