@@ -36,7 +36,7 @@ export default async function TopicPage({ params }: { params: Promise<{ topicId:
       {/* Header: what is this, and how fresh is it */}
       <header className="mt-4">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <h1 className="text-2xl font-semibold tracking-tight">{topic.name}</h1>
+          <h1 className="min-w-0 break-words text-2xl font-semibold tracking-tight">{topic.name}</h1>
           <span className="rounded px-1.5 py-0.5 text-[11px] font-medium muted ring-1 ring-inset hairline">
             {topic.status}
           </span>
@@ -160,7 +160,7 @@ export default async function TopicPage({ params }: { params: Promise<{ topicId:
                           </div>
                           <p className="mt-1.5 text-sm font-medium">{entry.title}</p>
                           {entry.content && (
-                            <p className="mt-1 whitespace-pre-wrap text-sm leading-6 muted">
+                            <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-6 muted">
                               {entry.content}
                             </p>
                           )}

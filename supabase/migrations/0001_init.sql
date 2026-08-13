@@ -62,16 +62,6 @@ begin
 end;
 $$;
 
--- Membership test used by every RLS policy. security definer so the policy on
--- workspace_members does not recurse into itself.
-create or replace function is_workspace_member(ws uuid)
-returns boolean language sql stable security definer set search_path = public as $$
-  select exists (
-    select 1 from workspace_members m
-    where m.workspace_id = ws and m.user_id = auth.uid()
-  );
-$$;
-
 -- ---------------------------------------------------------------------------
 -- Identity and containers
 -- ---------------------------------------------------------------------------
@@ -102,6 +92,18 @@ create table workspace_members (
   created_at   timestamptz not null default now(),
   primary key (workspace_id, user_id)
 );
+
+-- Membership test used by every RLS policy. security definer so the policy on
+-- workspace_members does not recurse into itself. Defined here rather than with
+-- the other helpers because its body references workspace_members, which
+-- Postgres resolves at creation time.
+create or replace function is_workspace_member(ws uuid)
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1 from workspace_members m
+    where m.workspace_id = ws and m.user_id = auth.uid()
+  );
+$$;
 
 -- ---------------------------------------------------------------------------
 -- Organization: topics and subtopics
@@ -513,6 +515,78 @@ create table deletion_log (
 );
 
 -- ---------------------------------------------------------------------------
+-- Workspace consistency
+--
+-- Every RLS policy authorises on the row's own workspace_id. Without the
+-- constraints below, a member of workspace B could insert a child row carrying
+-- workspace_id = B while pointing topic_id at a topic in workspace A: the
+-- policy's with-check passes, and the row lands attached to someone else's
+-- topic. The composite foreign keys make a child's workspace physically
+-- unable to disagree with its parent's, so authorisation and ownership can
+-- never drift apart.
+-- ---------------------------------------------------------------------------
+
+alter table topics    add constraint topics_id_workspace_uk    unique (id, workspace_id);
+alter table subtopics add constraint subtopics_id_workspace_uk unique (id, workspace_id);
+alter table prompts   add constraint prompts_id_workspace_uk   unique (id, workspace_id);
+
+do $$
+declare t text;
+begin
+  foreach t in array array[
+    'subtopics', 'knowledge_entries', 'decisions', 'ideas', 'prompts',
+    'file_references', 'actions', 'milestones', 'context_snapshots'
+  ] loop
+    execute format(
+      'alter table %1$I add constraint %1$I_topic_workspace_fk
+         foreign key (topic_id, workspace_id) references topics(id, workspace_id)
+         on delete cascade', t);
+  end loop;
+
+  -- Same rule for the optional subtopic pointer.
+  foreach t in array array[
+    'decisions', 'ideas', 'prompts', 'file_references', 'actions', 'context_snapshots'
+  ] loop
+    execute format(
+      'alter table %1$I add constraint %1$I_subtopic_workspace_fk
+         foreign key (subtopic_id, workspace_id) references subtopics(id, workspace_id)
+         on delete set null', t);
+  end loop;
+end $$;
+
+alter table prompt_versions
+  add constraint prompt_versions_prompt_workspace_fk
+  foreign key (prompt_id, workspace_id) references prompts(id, workspace_id) on delete cascade;
+
+-- Join tables carry no workspace_id of their own, so guard them with a trigger:
+-- both sides of the link must live in the same workspace.
+create or replace function join_same_workspace()
+returns trigger language plpgsql as $$
+declare left_ws uuid; right_ws uuid;
+begin
+  if tg_table_name = 'entry_subtopics' then
+    select workspace_id into left_ws from knowledge_entries where id = new.knowledge_entry_id;
+  else
+    select workspace_id into left_ws from source_sessions where id = new.source_session_id;
+  end if;
+  select workspace_id into right_ws from subtopics where id = new.subtopic_id;
+
+  if left_ws is null or right_ws is null or left_ws <> right_ws then
+    raise exception 'cross-workspace link rejected on %', tg_table_name;
+  end if;
+  return new;
+end;
+$$;
+
+create trigger entry_subtopics_same_workspace
+  before insert or update on entry_subtopics
+  for each row execute function join_same_workspace();
+
+create trigger session_subtopics_same_workspace
+  before insert or update on session_subtopics
+  for each row execute function join_same_workspace();
+
+-- ---------------------------------------------------------------------------
 -- Relationship integrity: no FK can span tables, so validate in a trigger.
 -- ---------------------------------------------------------------------------
 
@@ -706,10 +780,14 @@ create policy workspaces_owner_delete on workspaces
 
 create policy members_read on workspace_members
   for select using (user_id = auth.uid() or is_workspace_member(workspace_id));
+-- Only a workspace's owner may add members. An earlier draft also allowed
+-- `user_id = auth.uid()` so the bootstrap could insert its own row; that let
+-- ANY authenticated user join ANY workspace and read everything in it. The
+-- bootstrap does not need it — handle_new_user() is security definer and
+-- bypasses RLS — so the clause is gone. Caught by supabase/tests/02_rls.test.sql.
 create policy members_write on workspace_members
   for insert with check (
-    user_id = auth.uid()
-    or exists (select 1 from workspaces w where w.id = workspace_id and w.owner_id = auth.uid())
+    exists (select 1 from workspaces w where w.id = workspace_id and w.owner_id = auth.uid())
   );
 create policy members_delete on workspace_members
   for delete using (
@@ -784,3 +862,22 @@ $$;
 create trigger on_auth_user_created
   after insert on auth.users
   for each row execute function handle_new_user();
+
+-- ---------------------------------------------------------------------------
+-- Grants
+--
+-- A Supabase project sets default privileges that would cover this implicitly,
+-- but relying on project-level defaults makes the schema non-portable and
+-- silently breaks if those defaults ever change. Granting explicitly keeps the
+-- migration self-contained: RLS, not the absence of a grant, is what protects
+-- these tables.
+-- ---------------------------------------------------------------------------
+
+grant usage on schema public to anon, authenticated, service_role;
+grant select, insert, update, delete on all tables in schema public
+  to authenticated, service_role;
+grant execute on all functions in schema public to authenticated, service_role;
+
+-- `anon` is a signed-out visitor: it can reach nothing. Every policy requires
+-- auth.uid(), so this is defence in depth rather than the only barrier.
+revoke all on all tables in schema public from anon;

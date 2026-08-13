@@ -12,10 +12,12 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "db:push": "supabase db push",
-    "db:types": "supabase gen types typescript --linked > src/lib/adapters/supabase/database.types.ts"
+    "db:types": "supabase gen types typescript --linked > src/lib/adapters/supabase/database.types.ts",
+    "test:db": "bash scripts/db-test.sh",
+    "test:responsive": "node scripts/responsive-qa.mjs"
   },
   "dependencies": {
-    "@supabase/ssr": "^0.5.2",
+    "@supabase/ssr": "^0.12.4",
     "@supabase/supabase-js": "^2.45.4",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
@@ -33,6 +35,7 @@
     "@types/react-dom": "^19.2.0",
     "eslint": "^9.39.5",
     "eslint-config-next": "^16.3.0",
+    "playwright": "^1.62.1",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.6.3",
     "vitest": "^2.1.4"

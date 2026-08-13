@@ -59,6 +59,9 @@ These are permanent. Changing one requires the process at the bottom of this fil
 16. **Mutable scalar updates use optimistic concurrency** (`WHERE updated_at = <read value>`);
     zero rows affected surfaces a conflict to the user instead of clobbering.
 17. **Duplicate/conflict detection proposes; the user confirms.** Never silently merge.
+17a. **Never surface a raw driver error.** Everything thrown by the data layer goes through
+    `toUserFacingError()`; the detail is logged server-side, the user gets an actionable
+    sentence. Never fail silently either — every failure path renders something.
 
 ### Code structure
 18. **All data access goes through `src/lib/ports/*` interfaces.** Only `src/lib/adapters/**` may
@@ -87,7 +90,7 @@ These are permanent. Changing one requires the process at the bottom of this fil
 
 | # | Decision | Reason |
 |---|---|---|
-| AD-1 | **Next.js 15 App Router** over Vite SPA | Ingestion needs server endpoints (`/api/ingest`) and secrets; Topic pages are read-heavy joins that suit Server Components |
+| AD-1 | **Next.js 16 App Router** over Vite SPA | Ingestion needs server endpoints (`/api/ingest`) and secrets; Topic pages are read-heavy joins that suit Server Components |
 | AD-2 | **Supabase Postgres** as database | Real relational modeling, RLS as the authorization model, built-in FTS, `pg_dump` exit hatch |
 | AD-3 | **Supabase Auth**, magic-link primary | Same system as DB so `auth.uid()` works inside RLS policies; no password to sync between machines |
 | AD-4 | **Server-authoritative sync**, cache is read-through only | The brief: "the user's computer must not be the source of truth" |
@@ -97,8 +100,25 @@ These are permanent. Changing one requires the process at the bottom of this fil
 | AD-8 | **`ContextSnapshot` is derived and disposable** | Master Memory must be regenerable; it is never the source of truth |
 | AD-9 | **Tailwind v4** (CSS-first config) | No `tailwind.config.js` to drift |
 | AD-10 | **`last_meaningful_update_at` is separate from `updated_at`** | Renaming a topic is not progress; freshness must not be fooled by cosmetic edits |
+| AD-11 | **Composite `(id, workspace_id)` foreign keys on every topic-scoped child table** | RLS authorises on the row's own `workspace_id`; without this a member of workspace B can attach rows to a topic in workspace A and the with-check still passes |
+| AD-12 | **The schema is tested against a real ephemeral Postgres** (`npm run test:db`) | "The SQL looks correct" is not validation. This harness caught a privilege-escalation bug in the `workspace_members` insert policy |
+| AD-13 | **Both PKCE (`code`) and OTP (`token_hash`) sign-in links are accepted** | PKCE binds a link to the device that requested it, which breaks the Mac/Windows workflow this product exists to serve |
+| AD-14 | **`main` is the stable branch; work happens on feature branches** | See the Git workflow below |
 
 ---
+
+## Git workflow
+
+- **`main` is the stable, validated branch.** It must always build, typecheck, lint, and pass both
+  test suites.
+- **Work happens on a feature branch**, named for the phase or change (`phase-2-memory`,
+  `fix/rls-membership`).
+- **Merge into `main` only after validation passes** — the full command list below, plus any
+  phase exit criteria in `docs/ARCHITECTURE.md` §13.
+- **Never open a pull request whose head and base are the same branch.** If `main` does not yet
+  differ from the working branch, there is nothing to review.
+- Schema changes are new files in `supabase/migrations/`. Never edit an applied migration, and
+  never change schema from the Supabase dashboard — the next `db push` reverts it.
 
 ## Working rules for any session in this repo
 
@@ -118,10 +138,14 @@ npm run dev          # local dev server
 npm run build        # production build (must pass before any commit that touches src/)
 npm run typecheck    # tsc --noEmit
 npm run lint
-npm run test         # vitest
+npm run test         # vitest — domain logic, error sanitising, adapter mapping
+npm run test:db      # real ephemeral Postgres: migration + RLS + history guarantees
+npm run test:responsive -- <url>   # real Chromium at 1440/1280/768/390/375
 npm run db:push      # apply supabase/migrations to the linked project
 npm run db:types     # regenerate adapter-internal DB types
 ```
+
+All five must pass before merging to `main`.
 
 ## Layout
 
@@ -134,5 +158,7 @@ src/lib/adapters/   supabase/ — the ONLY place the vendor SDK appears
 src/lib/ingestion/  adapters → normalizer → persister
 src/lib/resume/     pure context assembler
 supabase/migrations/  checked-in SQL — never change schema from the dashboard
-docs/               ARCHITECTURE.md · SCHEMA.md · DEVELOPMENT_STATE.md
+supabase/tests/     SQL suites run by npm run test:db against a real cluster
+scripts/            db-test.sh · responsive-qa.mjs
+docs/               ARCHITECTURE.md · SCHEMA.md · DEPLOYMENT.md · DEVELOPMENT_STATE.md
 ```

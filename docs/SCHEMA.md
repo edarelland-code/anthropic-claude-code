@@ -3,6 +3,10 @@
 Companion to `supabase/migrations/0001_init.sql`. The migration is the authority; this file
 explains **why** the shape is what it is, and how to query it correctly.
 
+**Validated against a real PostgreSQL 16** by `npm run test:db`, which applies this exact
+migration to an ephemeral cluster and runs `supabase/tests/*.test.sql`. Not yet applied to a
+hosted Supabase project — see `docs/DEVELOPMENT_STATE.md`.
+
 Design rationale: `docs/ARCHITECTURE.md` §6–8. Permanent rules: `/CLAUDE.md`.
 
 ---
@@ -156,6 +160,23 @@ concurrent writes there produce two preserved versions rather than a lost one.
 
 ---
 
+## Workspace consistency
+
+Every RLS policy authorises on the row's *own* `workspace_id`. That alone is not enough: a member
+of workspace B could insert a child row carrying `workspace_id = B` while pointing `topic_id` at a
+topic in workspace A, and the with-check would pass.
+
+Composite foreign keys close it. `topics`, `subtopics`, and `prompts` each carry a
+`unique (id, workspace_id)`, and every topic-scoped child declares:
+
+```sql
+foreign key (topic_id, workspace_id) references topics(id, workspace_id) on delete cascade
+```
+
+A child's workspace is now physically unable to disagree with its parent's, so authorisation and
+ownership cannot drift apart. The two join tables (`entry_subtopics`, `session_subtopics`) carry
+no `workspace_id`, so a `join_same_workspace()` trigger enforces the same rule for them.
+
 ## Row Level Security
 
 Every table has RLS enabled and is scoped through `is_workspace_member(workspace_id)`, a
@@ -164,7 +185,17 @@ Join tables (`entry_subtopics`, `session_subtopics`, `taggables`) inherit access
 row via an `exists` subquery.
 
 Deny by default: a table with RLS enabled and no matching policy returns zero rows. Any new table
-must ship its policies in the same migration that creates it.
+must ship its policies in the same migration that creates it — `01_schema.test.sql` fails the
+build if one does not.
+
+**A policy that grants on `user_id = auth.uid()` for INSERT is almost always wrong** on a
+workspace-scoped table. An early draft of `members_write` did exactly that, which let any
+authenticated user join any workspace; `02_rls.test.sql` now regression-tests it. Authorise on
+membership, not on the row naming you.
+
+The migration also grants explicitly to `authenticated` and `service_role` and revokes from
+`anon`, rather than relying on Supabase's project-level default privileges — the schema has to be
+correct on its own.
 
 ---
 

@@ -68,7 +68,7 @@ export function OpenIssues({ topicId, actions }: { topicId: string; actions: Act
 
       <form ref={formRef} action={formAction} className="mt-3 space-y-2">
         <input type="hidden" name="topicId" value={topicId} />
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <select
             name="kind"
             defaultValue="next_step"
@@ -84,7 +84,7 @@ export function OpenIssues({ topicId, actions }: { topicId: string; actions: Act
             required
             maxLength={300}
             placeholder="Add…"
-            className="min-w-0 flex-1 rounded-md px-3 py-2 text-sm surface"
+            className="min-w-0 basis-full rounded-md px-3 py-2 text-sm surface sm:basis-auto sm:flex-1"
           />
           <AddButton />
         </div>

@@ -26,9 +26,16 @@ export async function middleware(request: NextRequest) {
 
   const supabase = createServerClient(url, anonKey, { cookies: cookieMethods });
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  // A network failure here must not 500 the whole app. Treat an unreachable
+  // auth service as "not signed in": the user lands on /login, which explains
+  // itself, instead of on an unstyled error page.
+  let user = null;
+  try {
+    const result = await supabase.auth.getUser();
+    user = result.data.user;
+  } catch (cause) {
+    console.error('[contextshelf] auth check failed in middleware:', cause);
+  }
 
   const path = request.nextUrl.pathname;
   const isPublic = path.startsWith('/login') || path.startsWith('/auth') || path.startsWith('/setup');

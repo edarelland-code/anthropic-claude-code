@@ -2,118 +2,162 @@
 
 > Live status file. Update after every meaningful milestone, without being asked
 > (CLAUDE.md working rules). Permanent rules live in `/CLAUDE.md`; reasoning lives in
-> `docs/ARCHITECTURE.md`.
+> `docs/ARCHITECTURE.md`; setup and deployment live in `docs/DEPLOYMENT.md`.
 
 **Last updated:** 2026-08-13
-**Current phase:** Phase 1 — Foundation (code complete, awaiting a live Supabase project)
+**Current phase:** Phase 1 — Foundation. **Hardened and database-validated. Not production
+validated, not cross-device validated.**
+**Phase 2 is blocked** until the exit criteria below pass.
+
+---
+
+## Status language
+
+The user asked for precision, so these terms mean exactly this and nothing more:
+
+| Term | Meaning |
+|---|---|
+| **Implemented** | The code exists and compiles |
+| **Locally tested** | Verified by automated tests on this machine |
+| **Database validated** | Verified against a real PostgreSQL executing the real migration |
+| **Production validated** | Verified on the deployed URL against the hosted Supabase project |
+| **Cross-device validated** | The same account was verified on two physical machines |
+
+---
+
+## Where Phase 1 actually stands
+
+| # | Exit criterion | Status | Evidence |
+|---|---|---|---|
+| A | Cloud database works | **Database validated** locally; **not** production validated | `npm run test:db` applies the real migration to a real Postgres 16 |
+| B | Authentication works | **Implemented**; not production validated | Magic link, PKCE + OTP, middleware refresh, route guards. Cannot exercise a real email flow without the hosted project |
+| C | Data persists after refresh | **Implemented**; not production validated | All reads are server-side from Postgres; there is no client store to lose |
+| D | Data persists after logout/login | **Implemented**; not production validated | Same |
+| E | Same account, another computer | **Not validated — blocked** | Needs the hosted project and the deployed URL |
+| F | Users cannot reach each other's data | **Database validated** | `supabase/tests/02_rls.test.sql` — read/update/delete/attach denied across topics, subtopics, entries, decisions, prompts, prompt bodies, actions, transcripts, join tables, and membership |
+| G | Topics work | **Implemented + locally tested** | CRUD, optimistic concurrency, soft delete + tombstone |
+| H | Nested subtopics work | **Implemented + database validated** | Parent link and acyclicity asserted in `03_history.test.sql` |
+| I | Knowledge entries work | **Implemented + locally tested** | Typed create, query, edit-with-version, supersede |
+| J | Source provenance works | **Implemented + locally tested** | `mappers.test.ts` asserts provenance survives and is never invented |
+| K | Current State separate from history | **Database validated + locally tested** | `03_history.test.sql` and `current-state.test.ts` both model the brief's blue-icon/checkmark/slash example |
+| L | Responsive desktop and mobile | **Partially validated** | 15 unauthenticated page/viewport combinations pass at 1440/1280/768/390/375. Authenticated pages need a session |
+| M | Production deployment | **Not started — blocked** | Needs the Vercel import |
+
+**Phase 1 is not complete.** E and M are blocked on actions only the account holder can take;
+B, C, D and L are partially blocked behind them.
 
 ---
 
 ## Completed
 
 ### Phase 0 — Architecture ✅
-- Problem restated, four failure modes named (`docs/ARCHITECTURE.md` §1)
-- Stack chosen with alternatives rejected on the record: Next.js 15 · TypeScript · Tailwind v4 ·
-  lucide · Supabase · Vercel (§2–3)
-- Cross-device sync model defined: server-authoritative, append-only, optimistic concurrency (§4)
-- Information architecture, normalized schema, Layer 1/Layer 2 split, Current-vs-History,
-  ingestion funnel, Resume assembler, desktop + mobile layouts, roadmap, risk register (§5–14)
-- `CLAUDE.md` written with 26 permanent rules and 10 recorded architecture decisions
-- Repository initialized; this file created
+Problem, stack, sync model, IA, schema, ingestion, resume, layouts, roadmap, risks — all in
+`docs/ARCHITECTURE.md`. Permanent rules in `CLAUDE.md`.
 
-### Phase 1 — Foundation (code complete)
-- **Schema** — `supabase/migrations/0001_init.sql`: 24 tables, 13 enums, RLS on every table,
-  `updated_at` triggers, subtopic-cycle guard, polymorphic relationship validation,
-  `supersede_entry()` transaction function, new-user bootstrap trigger, FTS + trigram indexes
-- **Append-only guarantees enforced in the database** — `prompt_versions` and
-  `knowledge_entry_versions` have SELECT + INSERT policies only, so an overwrite is impossible
-  rather than merely discouraged
-- **Port/adapter boundary** — `src/lib/ports/repositories.ts` (vendor-neutral) implemented by
-  `src/lib/adapters/supabase/`. No file under `app/` or `components/` imports the vendor SDK
-- **Auth** — magic-link sign-in, session refresh in middleware, route protection, sign-out
-- **Topics** — list, create, read, optimistic-concurrency update, soft delete + tombstone
-- **Subtopics** — nestable, create/rename/move/archive/restore
-- **Knowledge entries** — typed create, query with Current-only filter, edit that snapshots the
-  prior version, supersede via the SQL transaction, version listing, soft delete
-- **Actions** — next steps / blockers / questions with resolve
-- **Home** — Continue working · Blocked · Recently active · Stale topics
-- **Topic page** — Current (goal / state / progress / next action / resume trigger) · Active
-  decisions · Open issues · Subtopics · Add knowledge · Timeline grouped by day · right context
-  panel
-- **Responsive shell** — desktop sidebar; mobile bottom nav with centre Capture and a More sheet
-- **Honest placeholders** — Inbox, Timeline, Prompts, Ideas, Decisions, Files, Search each state
-  their phase and hold no mock data
-- **Schema reference** — `docs/SCHEMA.md`: table map, the three structural ideas, supersession
-  chain queries, RLS model, search, and an "adding a table" checklist
-- **Tooling** — ESLint 9 flat config (`next lint` was removed in Next 16, so the `lint` script now
-  runs `eslint` directly)
-- **Verification** — `npm run build`, `npm run typecheck`, `npm run lint`, and `npm run test`
-  (5/5) all pass
+### Phase 1 — Foundation (implemented)
+- Schema: 24 tables, 13 enums, RLS everywhere, `updated_at` triggers, subtopic-cycle guard,
+  polymorphic relationship validation, `supersede_entry()` transaction, new-user bootstrap
+- Append-only enforced by the absence of UPDATE/DELETE policies on the two history tables
+- Port/adapter boundary; only `src/lib/adapters/**` touches the vendor SDK
+- Magic-link auth, middleware session refresh, protected routes
+- Topics, nested subtopics, typed knowledge entries, actions
+- Home dashboard, Topic page with the Current/Timeline split, responsive shell
+
+### Phase 1 hardening (this pass)
+- **Real database test harness** — `npm run test:db` boots an ephemeral Postgres 16, applies the
+  Supabase auth shim, runs the real migration, and executes three SQL suites. No Docker, no
+  network, no Supabase account
+- **Cross-user RLS proven**, executed as the non-superuser `authenticated` role PostgREST uses
+- **Error handling** — `toUserFacingError()`, an `(app)` error boundary, a loading skeleton, a
+  not-found page, and a middleware that degrades to `/login` instead of 500-ing
+- **Auth robustness** — both PKCE and OTP link shapes accepted; open-redirect guard on `next`;
+  Supabase errors surfaced on the login page
+- **Responsive QA tooling** — `npm run test:responsive` drives real Chromium at five viewports
+- 38 unit tests across domain logic, error sanitising, and adapter mapping
 
 ---
 
-## Active work
+## Issues found and fixed this pass
 
-Nothing in progress. Phase 1 is code-complete but **not yet verified against a live database** —
-see Known issues.
+| # | Severity | Issue | Fix |
+|---|---|---|---|
+| 1 | **High — privilege escalation** | The `members_write` RLS policy allowed `user_id = auth.uid()`, letting **any** authenticated user insert themselves into **any** workspace and read everything in it | Policy now requires workspace ownership. The bootstrap never needed the clause — `handle_new_user()` is security definer. Caught by `02_rls.test.sql`, which now regression-tests it |
+| 2 | **High — cross-workspace writes** | Child rows carried their own `workspace_id`, so a member of workspace B could insert a row with `workspace_id = B` pointing at a topic in workspace A; the RLS with-check passed | Composite `(topic_id, workspace_id)` and `(subtopic_id, workspace_id)` foreign keys on all nine topic-scoped tables, plus a same-workspace trigger on the two join tables (AD-11) |
+| 3 | Medium | `is_workspace_member()` was defined before `workspace_members` existed — the migration **could not run at all** | Moved after the table. This is exactly what "the SQL looks correct" misses |
+| 4 | Medium | The migration relied on Supabase's implicit default privileges | Explicit `GRANT`s; `anon` revoked |
+| 5 | Medium | Magic links were PKCE-only, so a link requested on one machine failed on another — directly against the cross-device requirement | `/auth/confirm` + `/auth/callback` both accept `code` and `token_hash` (AD-13) |
+| 6 | Medium | `next` redirect parameter was unvalidated (open redirect) | Same-origin paths only |
+| 7 | Medium | Raw Postgres errors reached the UI, potentially naming tables and connection details | `toUserFacingError()`, with a test asserting a connection string never escapes |
+| 8 | Medium | A network failure in middleware 500-ed every route | Caught; degrades to signed-out |
+| 9 | Low | Docs claimed Next.js 15; Next.js **16.3.0** is installed | Docs corrected across four files. 16 is correct and deliberate — 15.0.3 carries CVE-2025-66478 |
+| 10 | Low | `@supabase/ssr` was 0.5.2 | Upgraded to 0.12.4 |
+| 11 | Low | Vitest could not resolve the `@/` alias | `vitest.config.ts` |
+| 12 | Low | Long unbroken strings could overflow at 375px; the Open Issues row was cramped | `break-words`; the input wraps to its own line on narrow screens |
 
 ---
 
-## Important decisions made during setup
+## Not validated
 
-| ID | Decision | Where |
-|---|---|---|
-| AD-1 | Next.js App Router over a Vite SPA — ingestion needs server endpoints and secrets | ARCH §2 |
-| AD-2 | Supabase Postgres over Firestore / Convex / Neon+Auth.js — relational modeling + RLS + FTS + exit hatch | ARCH §3 |
-| AD-3 | Magic-link auth — no password to sync between the Mac and the Windows PC | ARCH §3 |
-| AD-4 | Server-authoritative sync; local cache is read-through only | ARCH §4 |
-| AD-5 | Append-only + supersession instead of a merge algorithm — conflicts are safe by construction | ARCH §4, §8 |
-| AD-6 | Port/adapter boundary for all persistence | CLAUDE.md rule 18 |
-| AD-7 | Polymorphic `relationships` table with a validating trigger | ARCH §6 |
-| AD-8 | `ContextSnapshot` (Master Memory) is derived and disposable | ARCH §8 |
-| AD-10 | `last_meaningful_update_at` kept separate from `updated_at` | ARCH §6 |
-| — | Placeholder screens name their phase and render no data | CLAUDE.md rule 14 |
-| — | Unbuilt repository writes throw `NotYetImplemented` rather than silently no-op | `adapters/supabase/repositories.ts` |
+- Hosted Supabase project — does not exist yet
+- Real magic-link email delivery and redirect handling
+- Session persistence across a real browser restart
+- The same account on two physical machines
+- Production deployment, HTTPS, production environment variables
+- Authenticated-page responsive QA (25 page/viewport combinations skipped)
+- Expired/invalid session behaviour against real Supabase
+
+---
+
+## External dependencies (blocked on the account holder)
+
+1. **Supabase project** — `docs/DEPLOYMENT.md` §1–3
+2. **Vercel deployment** — §4
+3. **Supabase redirect allow-list** — §5
+4. **Email template change** — §6, recommended for cross-device sign-in
+
+Nothing else is blocked. Everything achievable without those accounts is done.
 
 ---
 
 ## Known issues / open items
 
-1. **No live Supabase project yet.** The migration has not been applied to a real database, so
-   the Phase 1 exit criteria are unmet. Blocks: create project → fill `.env.local` → `npm run
-   db:push` → sign in on two devices → confirm a topic created on one appears on the other.
-   *This is the single thing standing between Phase 1 code-complete and Phase 1 done.*
-2. **RLS cross-user test not yet run.** Risk R6. Needs a second account asserting zero rows from
-   the first. Must pass before Phase 2 starts.
-3. **`supersede_entry()` untested against a live database.** The transaction is written but has
-   not executed. Also unreachable from the UI until Phase 2 adds the supersede control.
-4. **Realtime not wired.** Cross-device updates currently require a refresh. Correctness is
-   unaffected (the database is authoritative); this is a latency improvement for Phase 2.
-5. **No Playwright suite yet.** Unit tests cover pure helpers only. Flow tests land with Phase 2.
-6. **Export/import not built** (Phase 3). Soft delete and tombstones exist; the recovery UI does
-   not.
-7. **`profiles` row depends on the `on_auth_user_created` trigger.** If a user existed before the
-   migration ran, they will have no workspace. Not a concern for a fresh project; worth a
-   backfill query if it ever happens.
+1. Realtime is not wired; cross-device updates need a refresh. Correctness is unaffected — the
+   database is authoritative. Phase 2.
+2. The supersede control is Phase 2 UI. The SQL function works and is tested; there is no button
+   yet. `docs/DEPLOYMENT.md` gives the SQL to verify criterion K in the meantime.
+3. No end-to-end browser test of an authenticated flow. Needs the hosted project.
+4. Export/import and the version-recovery UI are Phase 3.
+5. `entry_subtopics` / `session_subtopics` are guarded by a trigger rather than a composite FK,
+   because they carry no `workspace_id` of their own. Equivalent protection, slightly weaker
+   constraint story.
+
+---
+
+## Test results (last run, 2026-08-13)
+
+| Suite | Result |
+|---|---|
+| `npm run build` | pass — 16 routes |
+| `npm run typecheck` | pass |
+| `npm run lint` | pass, 0 warnings |
+| `npm run test` | **38 passed** / 4 files |
+| `npm run test:db` | **3 suites passed** against PostgreSQL 16.13 |
+| `npm run test:responsive` | 15 combinations pass, 25 skipped (need a session) |
 
 ---
 
 ## Next task
 
-**Stand up the Supabase project and verify Phase 1 end to end.**
-
-1. Create the project; copy `.env.example` → `.env.local` with real values
-2. `supabase link --project-ref <ref> && npm run db:push`
-3. Sign in; confirm the bootstrap trigger created a profile, workspace, and membership
-4. Create a topic, a subtopic, and three knowledge entries of different types
-5. Sign in from a second machine and confirm identical data (the cross-device exit criterion)
-6. Sign in as a second account and confirm zero visibility into the first account's rows (R6)
-7. Mark Phase 1 done here, then begin Phase 2 with the Decision Ledger and prompt versioning
+**Stand up the hosted project and run the cross-device acceptance test.**
+Follow `docs/DEPLOYMENT.md` §1–6, then the verification table in that document. When step 7 and
+step 9 of the cross-device test pass, mark criteria B–E, L, and M validated here — and only then
+start Phase 2 on a `phase-2-memory` branch.
 
 ---
 
 ## Resume trigger
 
 **IF** returning to ContextShelf development
-**THEN** verify Phase 1 against a live Supabase project using the checklist above before writing
-any Phase 2 code — CLAUDE.md forbids advancing a phase while foundation issues are open.
+**THEN** check whether the hosted Supabase project and Vercel deployment exist. If not, that is
+the only work item — everything else in Phase 1 is done and tested. If they do exist, run the
+`docs/DEPLOYMENT.md` verification table, update the status table above, then begin Phase 2.

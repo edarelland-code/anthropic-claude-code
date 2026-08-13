@@ -6,7 +6,7 @@ import { z } from 'zod';
 
 import { getData } from '@/lib/data';
 import { KNOWLEDGE_TYPES } from '@/lib/domain/types';
-import { ConflictError } from '@/lib/ports/repositories';
+import { toUserFacingError } from '@/lib/errors';
 
 export interface FormState {
   error: string | null;
@@ -42,7 +42,7 @@ export async function createTopicAction(_prev: FormState, formData: FormData): P
     });
     topicId = topic.id;
   } catch (cause) {
-    return { error: cause instanceof Error ? cause.message : 'Could not create the topic.' };
+    return { error: toUserFacingError(cause).message };
   }
 
   revalidatePath('/home');
@@ -75,7 +75,7 @@ export async function createSubtopicAction(
       parentSubtopicId: parsed.data.parentSubtopicId ?? null,
     });
   } catch (cause) {
-    return { error: cause instanceof Error ? cause.message : 'Could not create the subtopic.' };
+    return { error: toUserFacingError(cause).message };
   }
 
   revalidatePath(`/topics/${parsed.data.topicId}`);
@@ -115,7 +115,7 @@ export async function createEntryAction(_prev: FormState, formData: FormData): P
       subtopicIds: parsed.data.subtopicId ? [parsed.data.subtopicId] : [],
     });
   } catch (cause) {
-    return { error: cause instanceof Error ? cause.message : 'Could not save the entry.' };
+    return { error: toUserFacingError(cause).message };
   }
 
   revalidatePath(`/topics/${parsed.data.topicId}`);
@@ -159,8 +159,7 @@ export async function updateTopicAction(_prev: FormState, formData: FormData): P
       meaningful: true,
     });
   } catch (cause) {
-    if (cause instanceof ConflictError) return { error: cause.message };
-    return { error: cause instanceof Error ? cause.message : 'Could not update the topic.' };
+    return { error: toUserFacingError(cause).message };
   }
 
   revalidatePath(`/topics/${parsed.data.id}`);
@@ -190,7 +189,7 @@ export async function addActionAction(_prev: FormState, formData: FormData): Pro
       title: parsed.data.title,
     });
   } catch (cause) {
-    return { error: cause instanceof Error ? cause.message : 'Could not add the item.' };
+    return { error: toUserFacingError(cause).message };
   }
 
   revalidatePath(`/topics/${parsed.data.topicId}`);

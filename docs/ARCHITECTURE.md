@@ -48,7 +48,7 @@ work that already happened*.
 
 | Layer | Choice | Why |
 |---|---|---|
-| Framework | **Next.js 15 (App Router)** | See below |
+| Framework | **Next.js 16 (App Router)** | See below |
 | Language | **TypeScript**, `strict` | Non-negotiable for a schema this large |
 | UI | **React 19** + **Tailwind CSS v4** + **lucide-react** | As requested; Tailwind v4 needs no JS config file |
 | Data access | **Supabase Postgres** via a repository port layer | See §3 |

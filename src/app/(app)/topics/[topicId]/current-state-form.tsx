@@ -169,7 +169,7 @@ function Read({ label, value, placeholder }: { label: string; value: string | nu
   return (
     <div>
       <p className="text-xs font-medium uppercase tracking-wider muted">{label}</p>
-      <p className={`mt-1 whitespace-pre-wrap text-sm leading-6 ${value ? '' : 'muted'}`}>
+      <p className={`mt-1 whitespace-pre-wrap break-words text-sm leading-6 ${value ? '' : 'muted'}`}>
         {value || placeholder}
       </p>
     </div>
