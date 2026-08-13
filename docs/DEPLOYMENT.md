@@ -60,9 +60,19 @@ cp .env.example .env.local
 
 ```bash
 npx supabase login                       # [you] opens a browser once
-npx supabase link --project-ref <ref>    # the ref is in your project URL
+npx supabase link --project-ref <ref>    # prompts for the database password
 npm run db:push
 ```
+
+Verified against Supabase CLI **2.114.0**. Two things changed from older guides:
+
+- `--token` is no longer a flag on `login`/`link`/`projects`. Non-interactive use reads
+  `SUPABASE_ACCESS_TOKEN` from the environment instead.
+- `link` now declares `--password` as required. With a terminal attached it prompts, so the
+  command above is still correct interactively. Scripted, it is
+  `npx supabase link --project-ref <ref> --password "$SUPABASE_DB_PASSWORD"`.
+
+Never put the database password in a committed file or a shell history you sync.
 
 Then confirm it actually landed — the migration file being correct is not the same as the
 database being correct:

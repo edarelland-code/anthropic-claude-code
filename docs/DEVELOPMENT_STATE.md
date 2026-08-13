@@ -138,6 +138,16 @@ Two independent barriers, both verified this session rather than assumed:
    ```
    DNS resolves, so this is policy, not misconfiguration. No credential changes it.
 
+   Re-confirmed with the Supabase CLI itself (2.114.0 installs fine — npm is allow-listed):
+   ```
+   supabase projects list   ->  request rejected: host not permitted
+   supabase link            ->  request rejected: host not permitted
+   supabase db push         ->  Cannot find project ref (link never succeeded)
+   supabase db diff --linked->  Cannot find project ref (link never succeeded)
+   ```
+   "host not permitted" is the egress gateway refusing, not Supabase and not authentication —
+   a valid access token returns the identical error.
+
 Consequence: dashboard configuration, `supabase link`, `db push`, `db diff --linked`, and any live
 API call must be performed from the user's own machine, or the environment's network policy must
 be widened to allow `*.supabase.co` and `api.supabase.com`.
