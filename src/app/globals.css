@@ -1,0 +1,65 @@
+@import 'tailwindcss';
+
+/*
+ * ContextShelf visual language (CLAUDE.md rules 23–24):
+ * neutral foundation, one accent, colour reserved for knowledge type.
+ * No gradients, glass, or glow.
+ */
+
+@theme {
+  --color-surface: #ffffff;
+  --color-canvas: #f8fafc;
+  --color-line: #e2e8f0;
+  --color-ink: #0f172a;
+  --color-ink-muted: #64748b;
+  --color-accent: #4f46e5;
+}
+
+:root {
+  color-scheme: light dark;
+  --surface: #ffffff;
+  --canvas: #f7f8fa;
+  --line: #e4e7ec;
+  --ink: #101828;
+  --ink-muted: #667085;
+  --raised: #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: #14161a;
+    --canvas: #0c0d10;
+    --line: #24272e;
+    --ink: #e8eaed;
+    --ink-muted: #98a2b3;
+    --raised: #191c21;
+  }
+}
+
+body {
+  background: var(--canvas);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+@utility surface {
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+
+@utility hairline {
+  border-color: var(--line);
+}
+
+@utility muted {
+  color: var(--ink-muted);
+}
+
+/* Focus is always visible — keyboard navigation is a first-class path here. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
