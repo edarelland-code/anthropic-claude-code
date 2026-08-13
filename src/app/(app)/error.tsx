@@ -47,7 +47,7 @@ export default function AppError({
           <button
             type="button"
             onClick={reset}
-            className="inline-flex items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-500"
+            className="inline-flex items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-2.5 text-sm font-medium text-white hover:bg-indigo-500"
           >
             <RotateCw className="size-4" aria-hidden />
             Try again
@@ -55,7 +55,7 @@ export default function AppError({
           {expired && (
             <a
               href="/login"
-              className="rounded-md px-3 py-2 text-sm font-medium ring-1 ring-inset hairline hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+              className="rounded-md px-3 py-2.5 text-sm font-medium ring-1 ring-inset hairline hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
             >
               Sign in
             </a>

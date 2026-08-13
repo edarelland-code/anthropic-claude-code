@@ -72,7 +72,7 @@ export default function SetupPage() {
       {configured && (
         <a
           href="/home"
-          className="mt-8 inline-flex rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500"
+          className="mt-8 inline-flex rounded-md bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-indigo-500"
         >
           Open ContextShelf
         </a>

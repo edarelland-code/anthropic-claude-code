@@ -12,11 +12,19 @@
 
 create schema if not exists auth;
 
+-- Column set mirrors the parts of Supabase's real auth.users that our SQL
+-- touches, so scripts written for the hosted project run unmodified here.
 create table if not exists auth.users (
-  id                uuid primary key default gen_random_uuid(),
-  email             text unique,
+  id                 uuid primary key default gen_random_uuid(),
+  instance_id        uuid,
+  aud                varchar(255),
+  role               varchar(255),
+  email              text unique,
+  encrypted_password varchar(255),
+  email_confirmed_at timestamptz,
   raw_user_meta_data jsonb not null default '{}'::jsonb,
-  created_at        timestamptz not null default now()
+  created_at         timestamptz not null default now(),
+  updated_at         timestamptz
 );
 
 -- Supabase's definition: read `sub` out of the request's JWT claims GUC.

@@ -83,6 +83,28 @@ for suite in "$ROOT"/supabase/tests/*.test.sql; do
   fi
 done
 
+# The hosted scripts are written for the Supabase SQL Editor. Running them here
+# smoke-tests the SCRIPTS against a real cluster so they are known-good before
+# anyone pastes them into the production project. It does NOT validate the
+# hosted project itself.
+for suite in "$ROOT"/supabase/tests/hosted/*.sql; do
+  name="hosted/$(basename "$suite")"
+  echo "==> $name (script smoke test)"
+  out="$(as_pg "psql -v ON_ERROR_STOP=1 -h '$SOCK' -U postgres -d '$DB' -f '$suite'" 2>&1)" || {
+    echo "$out" | tail -5
+    echo "    FAIL"
+    status=1
+    continue
+  }
+  if echo "$out" | grep -qi 'FAIL'; then
+    echo "$out" | grep -i 'FAIL' | head -5
+    echo "    FAIL"
+    status=1
+  else
+    echo "    PASS"
+  fi
+done
+
 if [ "$status" -eq 0 ]; then
   echo "==> all database tests passed"
 else

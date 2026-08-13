@@ -37,7 +37,7 @@ export default async function HomePage() {
         </div>
         <Link
           href="/topics/new"
-          className="inline-flex items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-500"
+          className="inline-flex items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-2.5 text-sm font-medium text-white hover:bg-indigo-500"
         >
           <Plus className="size-4" aria-hidden />
           New topic
@@ -157,7 +157,7 @@ function FirstRun() {
       </p>
       <Link
         href="/topics/new"
-        className="mt-4 inline-flex items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-500"
+        className="mt-4 inline-flex items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-2.5 text-sm font-medium text-white hover:bg-indigo-500"
       >
         <Plus className="size-4" aria-hidden />
         Create your first topic

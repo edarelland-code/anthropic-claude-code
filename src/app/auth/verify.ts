@@ -19,6 +19,9 @@ import { isConfigured } from '@/lib/adapters/supabase/env';
  * The OTP shape is what makes "request on the Windows PC, click the link on
  * your phone" work. See docs/DEPLOYMENT.md for the email template that emits it.
  */
+/** Email-link types ContextShelf issues. Anything else is rejected. */
+const ACCEPTED_OTP_TYPES = ['magiclink', 'signup', 'email'] as const;
+
 export async function handleVerification(request: NextRequest): Promise<NextResponse> {
   const { searchParams, origin } = request.nextUrl;
 
@@ -37,7 +40,24 @@ export async function handleVerification(request: NextRequest): Promise<NextResp
 
   const code = searchParams.get('code');
   const tokenHash = searchParams.get('token_hash');
-  const type = (searchParams.get('type') ?? 'email') as EmailOtpType;
+
+  // `type` comes straight off the email link, so it is untrusted input.
+  // Validate against the shapes ContextShelf actually issues rather than
+  // forwarding an arbitrary string into the auth SDK.
+  //
+  //   magiclink  Magic Link template     — an existing account signing in
+  //   signup     Confirm signup template — signInWithOtp() sends this one for a
+  //              NEW address, so first-ever sign-in fails if only the Magic
+  //              Link template was updated
+  //   email      generic; accepted because Supabase's own docs use it
+  const requestedType = searchParams.get('type') ?? 'email';
+  const type = (ACCEPTED_OTP_TYPES as readonly string[]).includes(requestedType)
+    ? (requestedType as EmailOtpType)
+    : null;
+
+  if (tokenHash && type === null) {
+    return fail('This sign-in link has an unrecognised type.');
+  }
 
   if (!code && !tokenHash) return fail('This sign-in link is missing its token.');
 
@@ -45,7 +65,7 @@ export async function handleVerification(request: NextRequest): Promise<NextResp
     const supabase = await createServer();
 
     const { error } = tokenHash
-      ? await supabase.auth.verifyOtp({ type, token_hash: tokenHash })
+      ? await supabase.auth.verifyOtp({ type: type!, token_hash: tokenHash })
       : await supabase.auth.exchangeCodeForSession(code!);
 
     if (error) {

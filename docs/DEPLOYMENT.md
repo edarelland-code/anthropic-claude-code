@@ -95,6 +95,36 @@ that buys nothing here.)
 4. Set the **Production Branch** to `main`.
 5. Deploy. Note the URL — that is the ContextShelf URL you open everywhere.
 
+## 4a. Applying the migration when the CLI is unavailable
+
+The CLI is the preferred path — it records migration history. If it cannot run (for example from a
+sandboxed agent session with no outbound access to `supabase.co`), the SQL Editor is an acceptable
+fallback **provided the exact repository file is used**. Never retype or reconstruct the schema.
+
+1. Open `supabase/migrations/0001_init.sql` from this repository. Copy the entire file.
+2. Supabase dashboard → **SQL Editor** → New query → paste → **Run**.
+3. Record in `docs/DEVELOPMENT_STATE.md` that it was applied via the SQL Editor.
+4. **Repair migration history** so future `db push` runs behave, once the CLI is available:
+   ```bash
+   npx supabase link --project-ref omhktzxwffaipmcoljic
+   npx supabase migration repair --status applied 0001
+   npx supabase db diff --linked      # must print no differences
+   ```
+   Without step 4, the CLI believes `0001` was never applied and will try to run it again.
+
+### Verifying what actually landed
+
+Two scripts in `supabase/tests/hosted/` report on the real project. Both are safe: the first only
+reads catalogs, the second runs inside a transaction that is rolled back.
+
+| Script | What it answers |
+|---|---|
+| `hosted/01_verify_schema.sql` | Are the 24 tables, RLS, policies, composite FKs, triggers, indexes, functions, and grants actually there? Returns a 15-row PASS/FAIL table |
+| `hosted/02_rls_isolation.sql` | Does cross-user isolation hold *on this project*? Creates two throwaway users, exercises read/update/delete/attach/join-workspace as each, then rolls back |
+
+Both are smoke-tested against a real PostgreSQL by `npm run test:db`, so they are known to run
+before they touch production.
+
 ## 5. Point Supabase at that URL **[you]**
 
 **Authentication → URL Configuration:**
@@ -118,15 +148,31 @@ By default Supabase sends a PKCE link. PKCE binds the link to a `code_verifier` 
 the device that *requested* it, so a link requested on the Windows PC and opened on your phone
 fails.
 
-**Authentication → Email Templates → Magic Link**, replace the link with:
+**Two templates need this, not one.** `signInWithOtp()` sends the *Confirm signup* template to an
+address that has never signed in, and the *Magic Link* template thereafter. Updating only Magic
+Link leaves first-ever sign-in on the PKCE path.
+
+**Authentication → Email Templates → Magic Link:**
 
 ```html
-<a href="{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=email">Sign in to ContextShelf</a>
+<a href="{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=magiclink">Sign in to ContextShelf</a>
 ```
 
-That form carries no device-bound secret, so the link works wherever you open it. The app handles
-both shapes (`/auth/verify.ts`), so nothing breaks if you skip this — you just have to open the
-link on the machine that asked for it.
+**Authentication → Email Templates → Confirm signup:**
+
+```html
+<a href="{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=signup">Confirm your email</a>
+```
+
+`/auth/confirm` and `/auth/callback` both route into `src/app/auth/verify.ts`, which accepts
+`type` values of `magiclink`, `signup`, and `email` and rejects anything else, then calls
+`verifyOtp({ type, token_hash })`. These templates match that implementation exactly.
+
+Neither form carries a device-bound secret, so the link works wherever you open it. The app still
+handles PKCE `code` links, so nothing breaks if you skip this — you just have to open the link on
+the machine that requested it, which defeats the Mac/Windows workflow.
+
+Do not change any other template. Password recovery and email-change flows are not implemented.
 
 ---
 

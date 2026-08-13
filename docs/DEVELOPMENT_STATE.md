@@ -5,8 +5,12 @@
 > `docs/ARCHITECTURE.md`; setup and deployment live in `docs/DEPLOYMENT.md`.
 
 **Last updated:** 2026-08-13
-**Current phase:** Phase 1 — Foundation. **Hardened and database-validated. Not production
-validated, not cross-device validated.**
+**Current phase:** Phase 1 — Foundation. **Implemented · Locally validated. NOT hosted-database
+validated, NOT authentication configured, NOT production validated, NOT cross-device validated.**
+
+The hosted Supabase project exists (`omhktzxwffaipmcoljic`) and `.env.local` points at it, but
+**nothing has yet been applied to or verified against it.** The Claude Code session cannot reach
+`supabase.co` — see the blocker below.
 **Phase 2 is blocked** until the exit criteria below pass.
 
 ---
@@ -19,7 +23,9 @@ The user asked for precision, so these terms mean exactly this and nothing more:
 |---|---|
 | **Implemented** | The code exists and compiles |
 | **Locally tested** | Verified by automated tests on this machine |
-| **Database validated** | Verified against a real PostgreSQL executing the real migration |
+| **Locally validated** | Verified against a real ephemeral PostgreSQL executing the real migration |
+| **Hosted database validated** | Verified against the actual Supabase project `omhktzxwffaipmcoljic` |
+| **Authentication configured** | Redirect URLs and email templates set on the hosted project |
 | **Production validated** | Verified on the deployed URL against the hosted Supabase project |
 | **Cross-device validated** | The same account was verified on two physical machines |
 
@@ -29,17 +35,17 @@ The user asked for precision, so these terms mean exactly this and nothing more:
 
 | # | Exit criterion | Status | Evidence |
 |---|---|---|---|
-| A | Cloud database works | **Database validated** locally; **not** production validated | `npm run test:db` applies the real migration to a real Postgres 16 |
+| A | Cloud database works | **Locally validated.** Hosted: **Blocked** — migration not applied | `npm run test:db`; hosted verification script ready at `supabase/tests/hosted/01_verify_schema.sql` |
 | B | Authentication works | **Implemented**; not production validated | Magic link, PKCE + OTP, middleware refresh, route guards. Cannot exercise a real email flow without the hosted project |
 | C | Data persists after refresh | **Implemented**; not production validated | All reads are server-side from Postgres; there is no client store to lose |
 | D | Data persists after logout/login | **Implemented**; not production validated | Same |
 | E | Same account, another computer | **Not validated — blocked** | Needs the hosted project and the deployed URL |
-| F | Users cannot reach each other's data | **Database validated** | `supabase/tests/02_rls.test.sql` — read/update/delete/attach denied across topics, subtopics, entries, decisions, prompts, prompt bodies, actions, transcripts, join tables, and membership |
+| F | Users cannot reach each other's data | **Locally validated.** Hosted: **Blocked** | `supabase/tests/02_rls.test.sql` — read/update/delete/attach denied across topics, subtopics, entries, decisions, prompts, prompt bodies, actions, transcripts, join tables, and membership |
 | G | Topics work | **Implemented + locally tested** | CRUD, optimistic concurrency, soft delete + tombstone |
-| H | Nested subtopics work | **Implemented + database validated** | Parent link and acyclicity asserted in `03_history.test.sql` |
+| H | Nested subtopics work | **Locally validated** | Parent link and acyclicity asserted in `03_history.test.sql` |
 | I | Knowledge entries work | **Implemented + locally tested** | Typed create, query, edit-with-version, supersede |
 | J | Source provenance works | **Implemented + locally tested** | `mappers.test.ts` asserts provenance survives and is never invented |
-| K | Current State separate from history | **Database validated + locally tested** | `03_history.test.sql` and `current-state.test.ts` both model the brief's blue-icon/checkmark/slash example |
+| K | Current State separate from history | **Locally validated** | `03_history.test.sql` and `current-state.test.ts` both model the brief's blue-icon/checkmark/slash example |
 | L | Responsive desktop and mobile | **Partially validated** | 15 unauthenticated page/viewport combinations pass at 1440/1280/768/390/375. Authenticated pages need a session |
 | M | Production deployment | **Not started — blocked** | Needs the Vercel import |
 
@@ -113,6 +119,30 @@ Problem, stack, sync model, IA, schema, ingestion, resume, layouts, roadmap, ris
 - Expired/invalid session behaviour against real Supabase
 
 ---
+
+## The hosted-access blocker, precisely
+
+Two independent barriers, both verified this session rather than assumed:
+
+1. **No shared browser session.** Claude Code runs in an ephemeral cloud container. A browser
+   launched here is a different browser on a different machine from the one signed in to Supabase
+   — probed with Playwright, it sees `0` cookies for `supabase.com`. There is no tool in this
+   session that attaches to a browser on the user's own computer.
+2. **No network egress.** All Supabase hosts are refused at the gateway, with and without the
+   proxy:
+   ```
+   supabase.com                        CONNECT -> 403
+   api.supabase.com                    CONNECT -> 403
+   omhktzxwffaipmcoljic.supabase.co    CONNECT -> 403   (403 also when bypassing the proxy)
+   Playwright navigation               net::ERR_TUNNEL_CONNECTION_FAILED
+   ```
+   DNS resolves, so this is policy, not misconfiguration. No credential changes it.
+
+Consequence: dashboard configuration, `supabase link`, `db push`, `db diff --linked`, and any live
+API call must be performed from the user's own machine, or the environment's network policy must
+be widened to allow `*.supabase.co` and `api.supabase.com`.
+
+**`db diff --linked` has NOT been run. No claim about hosted/repository schema parity is made.**
 
 ## External dependencies (blocked on the account holder)
 

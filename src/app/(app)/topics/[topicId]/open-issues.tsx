@@ -100,7 +100,7 @@ function AddButton() {
     <button
       type="submit"
       disabled={pending}
-      className="shrink-0 rounded-md px-3 py-2 text-sm font-medium ring-1 ring-inset hairline hover:bg-black/[0.04] disabled:opacity-60 dark:hover:bg-white/[0.06]"
+      className="shrink-0 rounded-md px-3 py-2.5 text-sm font-medium ring-1 ring-inset hairline hover:bg-black/[0.04] disabled:opacity-60 dark:hover:bg-white/[0.06]"
     >
       Add
     </button>
