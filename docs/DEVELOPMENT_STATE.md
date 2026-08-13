@@ -97,6 +97,7 @@ Problem, stack, sync model, IA, schema, ingestion, resume, layouts, roadmap, ris
 | 10 | Low | `@supabase/ssr` was 0.5.2 | Upgraded to 0.12.4 |
 | 11 | Low | Vitest could not resolve the `@/` alias | `vitest.config.ts` |
 | 12 | Low | Long unbroken strings could overflow at 375px; the Open Issues row was cramped | `break-words`; the input wraps to its own line on narrow screens |
+| 14 | **Medium** | `/` and `/setup` were statically prerendered, so `isConfigured()` and the configuration diagnostic were frozen at build time — the diagnostic could never report the running server's environment, and a deployment whose variables changed after build would keep redirecting on stale state | `export const dynamic = 'force-dynamic'` on both. Found by pointing the app at the real project and watching `/setup` insist it was unconfigured |
 | 13 | Low | The `/setup` step list overflowed 14–29px at 390/375 once it named `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` — a 36-character unbreakable token in a flex child | `min-w-0` + `break-words`. Caught by `npm run test:responsive`, which is the first regression that harness has paid for |
 
 ---
@@ -115,7 +116,11 @@ Problem, stack, sync model, IA, schema, ingestion, resume, layouts, roadmap, ris
 
 ## External dependencies (blocked on the account holder)
 
-1. **Supabase project** — `docs/DEPLOYMENT.md` §1–3
+0. **This sandbox has no outbound access to `supabase.co`.** The environment's network policy
+   answers 403 to CONNECT for anything outside the package registries, so the hosted migration,
+   CLI linking, and any live API check cannot run from a Claude Code web session. They must run
+   from the user's own machine, or the environment's network policy must be widened.
+1. **Supabase project** — created. Ref `omhktzxwffaipmcoljic`. Schema **not yet applied**
 2. **Vercel deployment** — §4
 3. **Supabase redirect allow-list** — §5
 4. **Email template change** — §6, recommended for cross-device sign-in

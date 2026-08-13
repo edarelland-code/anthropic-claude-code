@@ -2,6 +2,10 @@ import { Database, KeyRound, Terminal } from 'lucide-react';
 
 import { configurationProblem, isConfigured } from '@/lib/adapters/supabase/env';
 
+// Same reason as `/`: this page reports the running server's configuration, so
+// prerendering it would freeze the diagnostic at build time and make it lie.
+export const dynamic = 'force-dynamic';
+
 /**
  * Shown when no cloud credentials are present. ContextShelf has no local
  * fallback store on purpose — the cloud database is the only source of truth
