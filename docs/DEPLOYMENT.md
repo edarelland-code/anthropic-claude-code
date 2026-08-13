@@ -13,7 +13,7 @@ a single command.
 | # | Action | Why | Time |
 |---|---|---|---|
 | 1 | Create a Supabase project | The cloud database and auth service. Cannot be created without your account. | 3 min |
-| 2 | Put its URL + anon key in `.env.local` | Connects the app to it | 1 min |
+| 2 | Put its URL + publishable key in `.env.local` | Connects the app to it | 1 min |
 | 3 | `npx supabase login && npx supabase link && npm run db:push` | Applies the schema | 2 min |
 | 4 | Import the repo into Vercel and paste the same two variables | Gives you the shared URL | 5 min |
 | 5 | Add the Vercel URL to Supabase's redirect allow-list | Otherwise sign-in links bounce | 1 min |
@@ -29,14 +29,23 @@ After step 4 you have the cross-device URL. Steps 5–6 make sign-in work reliab
 2. Name `contextshelf`. Pick the region closest to you. Save the database password somewhere safe —
    the app does not use it, but you will need it if you ever connect with `psql`.
 3. Wait for provisioning (~2 min).
-4. **Project Settings → API** and copy:
-   - **Project URL** → `NEXT_PUBLIC_SUPABASE_URL`
-   - **anon / public** key → `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+4. **Project Settings → API Keys** and copy:
+   - **Project URL** (Settings → API) → `NEXT_PUBLIC_SUPABASE_URL`
+   - **Publishable key**, `sb_publishable_…` → `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`
 
-The anon key is designed to ship to browsers; RLS is what protects the data, and
-`supabase/tests/02_rls.test.sql` proves it does. **The `service_role` key is different** — it
-bypasses RLS entirely. ContextShelf does not use it yet; when Phase 5 adds `/api/ingest` it will
-live in `SUPABASE_SERVICE_ROLE_KEY`, server-side only, never behind a `NEXT_PUBLIC_` prefix.
+The publishable key is Supabase's current browser-facing key and replaces the legacy anon JWT. It
+is designed to ship to browsers: RLS is what protects the data, and
+`supabase/tests/02_rls.test.sql` proves it does. **The secret key (`sb_secret_…`) is different** —
+it bypasses RLS entirely. ContextShelf does not use it yet; when Phase 5 adds `/api/ingest` it
+will live in `SUPABASE_SECRET_KEY`, server-side only, never behind a `NEXT_PUBLIC_` prefix.
+
+If your project predates the new key format and still shows only an anon JWT, generate the new
+pair from the same screen. ContextShelf reads only
+`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`; if the legacy variable is set instead, the `/setup`
+screen says so by name rather than failing silently.
+
+Note the naming split: the Postgres **roles** are still `anon`, `authenticated`, and
+`service_role`, and the migration grants against those names. Only the API key names changed.
 
 ## 2. Configure locally
 
@@ -81,7 +90,7 @@ that buys nothing here.)
    | Name | Value |
    |---|---|
    | `NEXT_PUBLIC_SUPABASE_URL` | your project URL |
-   | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | your anon key |
+   | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | your publishable key (`sb_publishable_…`) |
    | `NEXT_PUBLIC_SITE_URL` | `https://<your-app>.vercel.app` |
 4. Set the **Production Branch** to `main`.
 5. Deploy. Note the URL — that is the ContextShelf URL you open everywhere.
@@ -214,7 +223,8 @@ and tears everything down.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Redirected to `/setup` | Env vars missing or still the placeholder | Set both `NEXT_PUBLIC_` vars and redeploy |
+| Redirected to `/setup` | Env vars missing or still the placeholder | The `/setup` screen names the missing variable. Set both `NEXT_PUBLIC_` vars and redeploy |
+| `/setup` says the anon key is set but the publishable key is not | Following an older Supabase guide | Rename the variable to `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` and use the `sb_publishable_…` value |
 | Magic link goes nowhere | Redirect URL not allow-listed | §5 |
 | "Email link is invalid or has expired" on another device | PKCE link opened off-device | §6 |
 | Signed in but "No workspace found" | Migration not applied | `npm run db:push` |

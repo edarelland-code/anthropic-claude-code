@@ -871,6 +871,12 @@ create trigger on_auth_user_created
 -- silently breaks if those defaults ever change. Granting explicitly keeps the
 -- migration self-contained: RLS, not the absence of a grant, is what protects
 -- these tables.
+--
+-- `anon`, `authenticated`, and `service_role` are Postgres ROLE names and are
+-- unchanged by Supabase's move from anon/service_role API keys to publishable/
+-- secret ones. The publishable key still resolves to `anon` before sign-in and
+-- `authenticated` after it; the secret key still resolves to `service_role`.
+-- Only the environment variable names changed — see .env.example.
 -- ---------------------------------------------------------------------------
 
 grant usage on schema public to anon, authenticated, service_role;

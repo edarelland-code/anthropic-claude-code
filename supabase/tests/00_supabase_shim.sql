@@ -36,7 +36,9 @@ returns text language sql stable as $$
   )::text
 $$;
 
--- The roles PostgREST switches into. `authenticated` is the one that matters:
+-- The roles PostgREST switches into. These role names are unchanged by the
+-- publishable/secret API key naming — the keys resolve to these same roles.
+-- `authenticated` is the one that matters:
 -- it is NOT a superuser and does NOT have BYPASSRLS, so policies actually
 -- apply to it — which is the whole point of the RLS test.
 do $$

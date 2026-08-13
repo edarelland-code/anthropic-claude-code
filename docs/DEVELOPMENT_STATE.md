@@ -73,7 +73,11 @@ Problem, stack, sync model, IA, schema, ingestion, resume, layouts, roadmap, ris
 - **Auth robustness** — both PKCE and OTP link shapes accepted; open-redirect guard on `next`;
   Supabase errors surfaced on the login page
 - **Responsive QA tooling** — `npm run test:responsive` drives real Chromium at five viewports
-- 38 unit tests across domain logic, error sanitising, and adapter mapping
+- 48 unit tests across domain logic, error sanitising, adapter mapping, and the environment contract
+- Migrated from the legacy Supabase anon JWT to the current **publishable key**
+  (`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`). No silent fallback to the old variable: if only the
+  legacy name is set, `/setup` names it explicitly. The Postgres roles (`anon`, `authenticated`,
+  `service_role`) are unchanged — only the API key naming moved
 
 ---
 
@@ -93,6 +97,7 @@ Problem, stack, sync model, IA, schema, ingestion, resume, layouts, roadmap, ris
 | 10 | Low | `@supabase/ssr` was 0.5.2 | Upgraded to 0.12.4 |
 | 11 | Low | Vitest could not resolve the `@/` alias | `vitest.config.ts` |
 | 12 | Low | Long unbroken strings could overflow at 375px; the Open Issues row was cramped | `break-words`; the input wraps to its own line on narrow screens |
+| 13 | Low | The `/setup` step list overflowed 14–29px at 390/375 once it named `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` — a 36-character unbreakable token in a flex child | `min-w-0` + `break-words`. Caught by `npm run test:responsive`, which is the first regression that harness has paid for |
 
 ---
 
@@ -140,7 +145,7 @@ Nothing else is blocked. Everything achievable without those accounts is done.
 | `npm run build` | pass — 16 routes |
 | `npm run typecheck` | pass |
 | `npm run lint` | pass, 0 warnings |
-| `npm run test` | **38 passed** / 4 files |
+| `npm run test` | **48 passed** / 5 files |
 | `npm run test:db` | **3 suites passed** against PostgreSQL 16.13 |
 | `npm run test:responsive` | 15 combinations pass, 25 skipped (need a session) |
 

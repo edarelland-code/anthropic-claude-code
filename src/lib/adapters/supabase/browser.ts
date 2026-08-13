@@ -11,5 +11,5 @@ import { readEnv } from './env';
 export function createBrowser(): SupabaseClient {
   const env = readEnv();
   if (!env) throw new Error('Supabase is not configured. See .env.example.');
-  return createBrowserClient(env.url, env.anonKey);
+  return createBrowserClient(env.url, env.publishableKey);
 }

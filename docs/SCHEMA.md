@@ -197,6 +197,10 @@ The migration also grants explicitly to `authenticated` and `service_role` and r
 `anon`, rather than relying on Supabase's project-level default privileges — the schema has to be
 correct on its own.
 
+Those are Postgres **role** names and are unaffected by Supabase's publishable/secret API key
+naming: the publishable key resolves to `anon` before sign-in and `authenticated` after it, and
+the secret key resolves to `service_role`. Only the environment variable names changed.
+
 ---
 
 ## Search

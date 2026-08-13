@@ -8,10 +8,10 @@ import { NextResponse, type NextRequest } from 'next/server';
  */
 export async function middleware(request: NextRequest) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const publishableKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
 
   // Unconfigured: let the app render its setup screen instead of erroring.
-  if (!url || !anonKey || url.includes('YOUR-PROJECT-REF')) return NextResponse.next();
+  if (!url || !publishableKey || url.includes('YOUR-PROJECT-REF')) return NextResponse.next();
 
   let response = NextResponse.next({ request });
 
@@ -24,7 +24,7 @@ export async function middleware(request: NextRequest) {
     },
   };
 
-  const supabase = createServerClient(url, anonKey, { cookies: cookieMethods });
+  const supabase = createServerClient(url, publishableKey, { cookies: cookieMethods });
 
   // A network failure here must not 500 the whole app. Treat an unreachable
   // auth service as "not signed in": the user lands on /login, which explains

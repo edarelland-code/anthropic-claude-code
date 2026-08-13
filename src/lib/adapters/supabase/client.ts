@@ -25,7 +25,7 @@ export async function createServer(): Promise<SupabaseClient> {
     },
   };
 
-  return createServerClient(env.url, env.anonKey, { cookies: cookieMethods });
+  return createServerClient(env.url, env.publishableKey, { cookies: cookieMethods });
 }
 
 export { isConfigured, readEnv } from './env';
