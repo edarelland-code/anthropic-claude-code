@@ -43,7 +43,12 @@
 - **Responsive shell** — desktop sidebar; mobile bottom nav with centre Capture and a More sheet
 - **Honest placeholders** — Inbox, Timeline, Prompts, Ideas, Decisions, Files, Search each state
   their phase and hold no mock data
-- **Verification** — `npm run build` passes, `npm run typecheck` clean, `npm run test` 5/5 green
+- **Schema reference** — `docs/SCHEMA.md`: table map, the three structural ideas, supersession
+  chain queries, RLS model, search, and an "adding a table" checklist
+- **Tooling** — ESLint 9 flat config (`next lint` was removed in Next 16, so the `lint` script now
+  runs `eslint` directly)
+- **Verification** — `npm run build`, `npm run typecheck`, `npm run lint`, and `npm run test`
+  (5/5) all pass
 
 ---
 
