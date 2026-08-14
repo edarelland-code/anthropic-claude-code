@@ -789,11 +789,129 @@ class SupabaseDecisions implements DecisionRepository {
     if (error) throw new Error(`list decisions: ${error.message}`);
     return (data ?? []).map((r) => map.toDecision(r as Row));
   }
-  async create(): Promise<Decision> {
-    throw new NotYetImplemented('Creating decisions', 2);
+  async getById(id: string): Promise<Decision | null> {
+    const { data, error } = await this.db.from('decisions').select('*').eq('id', id).maybeSingle();
+    if (error) throw new Error(`get decision: ${error.message}`);
+    return data ? map.toDecision(data as unknown as Row) : null;
   }
-  async supersede(): Promise<void> {
-    throw new NotYetImplemented('Superseding decisions', 2);
+
+  async create(input: {
+    topicId: string;
+    subtopicId?: string | null;
+    title: string;
+    decision: string;
+    reason?: string | null;
+    alternatives?: string[];
+    approvedDirection?: string | null;
+    status?: Decision['status'];
+    sourceType?: SourceType;
+    sourceSessionId?: string | null;
+  }): Promise<Decision> {
+    const { data: userData } = await this.db.auth.getUser();
+    if (!userData.user) throw new Error('not signed in');
+    const { data: topicRow, error: topicErr } = await this.db
+      .from('topics')
+      .select('workspace_id')
+      .eq('id', input.topicId)
+      .single();
+    if (topicErr) throw new Error(`create decision: ${topicErr.message}`);
+
+    const row = unwrap(
+      await this.db
+        .from('decisions')
+        .insert({
+          workspace_id: (topicRow as Row).workspace_id,
+          topic_id: input.topicId,
+          subtopic_id: input.subtopicId ?? null,
+          user_id: userData.user.id,
+          title: input.title.trim(),
+          decision: input.decision.trim(),
+          reason: input.reason ?? null,
+          // jsonb, so an empty list stays an empty list rather than becoming null.
+          alternatives: input.alternatives ?? [],
+          approved_direction: input.approvedDirection ?? null,
+          status: input.status ?? 'active',
+          source_type: input.sourceType ?? 'manual',
+          source_session_id: input.sourceSessionId ?? null,
+        })
+        .select('*')
+        .single(),
+      'create decision',
+    );
+
+    // A decision is a decision first; the entry exists so it appears in the
+    // Timeline with its provenance. The decision row stays authoritative for
+    // status, reason, alternatives, and supersession — those are never mirrored
+    // onto the entry, so there is nothing to keep in sync.
+    await this.mirrorToTimeline(row, input.topicId, userData.user.id, input.sourceType);
+
+    await this.db
+      .from('topics')
+      .update({ last_meaningful_update_at: new Date().toISOString() })
+      .eq('id', input.topicId);
+
+    return map.toDecision(row);
+  }
+
+  async setStatus(id: string, status: Decision['status']): Promise<Decision> {
+    if (status === 'superseded') {
+      // Reaching this state by hand would leave superseded_by_id null and break
+      // the pairing the ledger depends on.
+      throw new Error('A decision becomes superseded by superseding it, not by setting a status.');
+    }
+    const row = unwrap(
+      await this.db.from('decisions').update({ status }).eq('id', id).select('*').single(),
+      'update decision status',
+    );
+    return map.toDecision(row);
+  }
+
+  async supersede(input: { id: string; newDecisionId: string; reason: string }): Promise<void> {
+    if (!input.reason?.trim()) {
+      // The database enforces this too; failing here gives the user a sentence
+      // instead of a constraint violation.
+      throw new Error('A reason is required to supersede a decision.');
+    }
+    const { error } = await this.db.rpc('supersede_decision', {
+      p_old_decision_id: input.id,
+      p_new_decision_id: input.newDecisionId,
+      p_reason: input.reason.trim(),
+    });
+    if (error) throw new Error(`supersede decision: ${error.message}`);
+  }
+
+  /** Creates the knowledge entry that carries this decision into the Timeline. */
+  private async mirrorToTimeline(
+    row: Row,
+    topicId: string,
+    userId: string,
+    sourceType?: SourceType,
+  ): Promise<void> {
+    const { data: entry } = await this.db
+      .from('knowledge_entries')
+      .insert({
+        workspace_id: row.workspace_id,
+        topic_id: topicId,
+        user_id: userId,
+        knowledge_type: 'decision',
+        title: row.title,
+        content: row.decision,
+        source_type: sourceType ?? 'manual',
+      })
+      .select('id')
+      .single();
+
+    if (!entry) return;
+    const entryId = String((entry as Row).id);
+    await this.db
+      .from('decisions')
+      .update({ knowledge_entry_id: entryId })
+      .eq('id', row.id as string);
+    if (row.subtopic_id) {
+      await this.db
+        .from('entry_subtopics')
+        .insert({ knowledge_entry_id: entryId, subtopic_id: row.subtopic_id });
+    }
   }
 }
 
@@ -809,11 +927,92 @@ class SupabaseIdeas implements IdeaRepository {
     if (error) throw new Error(`list ideas: ${error.message}`);
     return (data ?? []).map((r) => map.toIdea(r as Row));
   }
-  async create(): Promise<Idea> {
-    throw new NotYetImplemented('Creating ideas', 2);
+  async getById(id: string): Promise<Idea | null> {
+    const { data, error } = await this.db.from('ideas').select('*').eq('id', id).maybeSingle();
+    if (error) throw new Error(`get idea: ${error.message}`);
+    return data ? map.toIdea(data as unknown as Row) : null;
   }
-  async setStatus(): Promise<Idea> {
-    throw new NotYetImplemented('Idea lifecycle changes', 2);
+
+  async create(input: {
+    topicId: string;
+    subtopicId?: string | null;
+    title: string;
+    idea?: string | null;
+    rationale?: string | null;
+    status?: Idea['status'];
+    sourceType?: SourceType;
+    sourceSessionId?: string | null;
+  }): Promise<Idea> {
+    const { data: userData } = await this.db.auth.getUser();
+    if (!userData.user) throw new Error('not signed in');
+    const { data: topicRow, error: topicErr } = await this.db
+      .from('topics')
+      .select('workspace_id')
+      .eq('id', input.topicId)
+      .single();
+    if (topicErr) throw new Error(`create idea: ${topicErr.message}`);
+
+    const row = unwrap(
+      await this.db
+        .from('ideas')
+        .insert({
+          workspace_id: (topicRow as Row).workspace_id,
+          topic_id: input.topicId,
+          subtopic_id: input.subtopicId ?? null,
+          user_id: userData.user.id,
+          title: input.title.trim(),
+          idea: input.idea ?? null,
+          rationale: input.rationale ?? null,
+          status: input.status ?? 'suggested',
+          source_type: input.sourceType ?? 'manual',
+          source_session_id: input.sourceSessionId ?? null,
+        })
+        .select('*')
+        .single(),
+      'create idea',
+    );
+    return map.toIdea(row);
+  }
+
+  /**
+   * Moves an idea through its lifecycle.
+   *
+   * A rejected idea keeps its rationale and stays queryable: that is what feeds
+   * the avoid-list, and it is the whole reason a rejected idea is not deleted
+   * (CLAUDE.md rule 9). `note` is appended to the rationale rather than
+   * replacing it, so the original reasoning survives the status change.
+   */
+  async setStatus(id: string, status: Idea['status'], note?: string): Promise<Idea> {
+    const patch: Row = { status };
+    if (note?.trim()) {
+      const { data: existing } = await this.db
+        .from('ideas')
+        .select('rationale')
+        .eq('id', id)
+        .maybeSingle();
+      const previous = (existing as Row | null)?.rationale;
+      const prefix = typeof previous === 'string' && previous.trim() ? `${previous}\n\n` : '';
+      patch.rationale = `${prefix}[${status}] ${note.trim()}`;
+    }
+    const row = unwrap(
+      await this.db.from('ideas').update(patch).eq('id', id).select('*').single(),
+      'update idea status',
+    );
+    return map.toIdea(row);
+  }
+
+  /** Records that an idea became a decision, without duplicating either. */
+  async linkDecision(ideaId: string, decisionId: string | null): Promise<Idea> {
+    const row = unwrap(
+      await this.db
+        .from('ideas')
+        .update({ decision_id: decisionId })
+        .eq('id', ideaId)
+        .select('*')
+        .single(),
+      'link idea to decision',
+    );
+    return map.toIdea(row);
   }
 }
 
@@ -848,17 +1047,153 @@ class SupabasePrompts implements PromptRepository {
       : [];
     return { prompt: map.toPrompt(row), versions };
   }
-  async create(): Promise<{ prompt: Prompt; version: PromptVersion }> {
-    throw new NotYetImplemented('Creating prompts', 2);
+  async create(input: {
+    topicId: string;
+    subtopicId?: string | null;
+    title: string;
+    body: string;
+    purpose?: string | null;
+    sourceType?: SourceType;
+  }): Promise<{ prompt: Prompt; version: PromptVersion }> {
+    const { data: userData } = await this.db.auth.getUser();
+    if (!userData.user) throw new Error('not signed in');
+    const { data: topicRow, error: topicErr } = await this.db
+      .from('topics')
+      .select('workspace_id')
+      .eq('id', input.topicId)
+      .single();
+    if (topicErr) throw new Error(`create prompt: ${topicErr.message}`);
+    const workspaceId = (topicRow as Row).workspace_id;
+
+    const promptRow = unwrap(
+      await this.db
+        .from('prompts')
+        .insert({
+          workspace_id: workspaceId,
+          topic_id: input.topicId,
+          subtopic_id: input.subtopicId ?? null,
+          user_id: userData.user.id,
+          title: input.title.trim(),
+          purpose: input.purpose ?? null,
+          source_type: input.sourceType ?? 'manual',
+        })
+        .select('*')
+        .single(),
+      'create prompt',
+    );
+
+    const versionRow = unwrap(
+      await this.db
+        .from('prompt_versions')
+        .insert({
+          prompt_id: promptRow.id,
+          workspace_id: workspaceId,
+          user_id: userData.user.id,
+          version: 1,
+          body: input.body,
+          result: 'untested',
+        })
+        .select('*')
+        .single(),
+      'create prompt version',
+    );
+
+    const withCurrent = unwrap(
+      await this.db
+        .from('prompts')
+        .update({ current_version_id: versionRow.id })
+        .eq('id', promptRow.id as string)
+        .select('*')
+        .single(),
+      'set current prompt version',
+    );
+
+    return { prompt: map.toPrompt(withCurrent), version: map.toPromptVersion(versionRow) };
   }
-  async addVersion(): Promise<PromptVersion> {
-    throw new NotYetImplemented('Prompt versioning', 2);
+
+  /**
+   * Appends a version. Never touches an existing one.
+   *
+   * prompt_versions has SELECT and INSERT policies and no UPDATE or DELETE, so
+   * "a previous prompt is never overwritten" is a database guarantee rather
+   * than a promise this method makes (CLAUDE.md rule 6). The version number is
+   * derived from the current maximum; the UNIQUE(prompt_id, version) constraint
+   * turns a concurrent double-append into an error rather than a lost version.
+   */
+  async addVersion(input: {
+    promptId: string;
+    body: string;
+    notes?: string | null;
+    result?: PromptVersion['result'];
+  }): Promise<PromptVersion> {
+    const { data: userData } = await this.db.auth.getUser();
+    if (!userData.user) throw new Error('not signed in');
+
+    const { data: promptRow, error: promptErr } = await this.db
+      .from('prompts')
+      .select('workspace_id')
+      .eq('id', input.promptId)
+      .single();
+    if (promptErr) throw new Error(`add prompt version: ${promptErr.message}`);
+
+    const { data: latest } = await this.db
+      .from('prompt_versions')
+      .select('version')
+      .eq('prompt_id', input.promptId)
+      .order('version', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const next = Number((latest as Row | null)?.version ?? 0) + 1;
+
+    const row = unwrap(
+      await this.db
+        .from('prompt_versions')
+        .insert({
+          prompt_id: input.promptId,
+          workspace_id: (promptRow as Row).workspace_id,
+          user_id: userData.user.id,
+          version: next,
+          body: input.body,
+          notes: input.notes ?? null,
+          result: input.result ?? 'untested',
+        })
+        .select('*')
+        .single(),
+      'add prompt version',
+    );
+
+    await this.db
+      .from('prompts')
+      .update({ current_version_id: row.id })
+      .eq('id', input.promptId);
+
+    return map.toPromptVersion(row);
   }
+
+  /**
+   * Records how a version performed.
+   *
+   * Blocked on a rule decision, not on implementation. prompt_versions carries
+   * result/rating/notes columns, but CLAUDE.md rule 6 makes the table
+   * insert-only through the absence of an UPDATE policy — and
+   * hosted/01_verify_schema.sql asserts that absence. Whether a prompt worked
+   * is learned after the body is written, so the two cannot both hold as
+   * stated. Failing loudly here beats silently updating zero rows, which is
+   * what an UPDATE against this table actually does today.
+   */
   async rateVersion(): Promise<PromptVersion> {
-    throw new NotYetImplemented('Prompt rating', 2);
+    throw new NotYetImplemented(
+      'Rating an existing prompt version (rule 6 makes prompt_versions insert-only; a result can be set when the version is added)',
+      2,
+    );
   }
-  async markWinning(): Promise<void> {
-    throw new NotYetImplemented('Marking winning prompts', 2);
+
+  async markWinning(promptId: string, isWinning: boolean): Promise<void> {
+    const { error } = await this.db
+      .from('prompts')
+      .update({ is_winning: isWinning })
+      .eq('id', promptId);
+    if (error) throw new Error(`mark winning prompt: ${error.message}`);
   }
 }
 

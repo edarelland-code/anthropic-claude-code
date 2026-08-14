@@ -10,6 +10,7 @@ import type {
   Action,
   ActionKind,
   Decision,
+  DecisionStatus,
   EntityType,
   FileReference,
   Idea,
@@ -174,6 +175,7 @@ export interface KnowledgeRepository {
 
 export interface DecisionRepository {
   listForTopic(topicId: string): Promise<Decision[]>;
+  getById(id: string): Promise<Decision | null>;
   create(input: {
     topicId: string;
     subtopicId?: string | null;
@@ -182,9 +184,17 @@ export interface DecisionRepository {
     reason?: string | null;
     alternatives?: string[];
     approvedDirection?: string | null;
+    status?: DecisionStatus;
     sourceType?: SourceType;
     sourceSessionId?: string | null;
   }): Promise<Decision>;
+  /**
+   * Moves a decision between the states a user can choose. `superseded` is not
+   * one of them — that state exists only as the result of `supersede()`, which
+   * also sets the pointer the ledger reads.
+   */
+  setStatus(id: string, status: DecisionStatus): Promise<Decision>;
+  /** `reason` is required — CLAUDE.md rule 7, enforced here and in the database. */
   supersede(input: { id: string; newDecisionId: string; reason: string }): Promise<void>;
 }
 
