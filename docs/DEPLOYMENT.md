@@ -290,6 +290,21 @@ handles that shape, so sign-in works — but the link is bound to the device tha
 open it on that device. This is the one part of AD-13's promise that configuration alone cannot
 deliver.
 
+## Status: Phase 1 is provisioned and closed
+
+This document is now a runbook for reproducing the setup, not a list of things still to do. As of
+2026-08-14 the hosted project and the deployment both exist and are validated:
+
+| | |
+|---|---|
+| Production URL | <https://contextshelf.vercel.app> |
+| Supabase project | `omhktzxwffaipmcoljic` — 24 tables, 31 policies, migration `0001` recorded |
+| Auth | Site URL and five redirect URLs set |
+| Cross-device | **Passed on two physical machines**, both directions |
+
+The one step that could not be completed is §6, the email templates — see §6a. Everything else in
+§§1–5 is done.
+
 ## Verifying the deployment
 
 Run these in order. Each is a Phase 1 exit criterion.
@@ -309,6 +324,11 @@ Run these in order. Each is a Phase 1 exit criterion.
 | M. Production | Open the URL on a phone | works over HTTPS |
 
 ### The cross-device test (the acceptance test)
+
+> **Passed 2026-08-14** on two physical machines: data created on the Work PC appeared on the Mac,
+> and an update made on the Mac appeared back on the Work PC. No export, no import. The steps
+> below remain the procedure for re-verifying after any change to auth, session handling, or the
+> data layer.
 
 **Device A — whichever machine you are at now (Windows PC or Mac)**
 

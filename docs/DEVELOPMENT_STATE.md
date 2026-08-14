@@ -5,14 +5,17 @@
 > `docs/ARCHITECTURE.md`; setup and deployment live in `docs/DEPLOYMENT.md`.
 
 **Last updated:** 2026-08-14
-**Current phase:** Phase 1 — Foundation. **Hosted-database validated · Production deployed ·
-Authentication validated · Authenticated responsive QA complete.** Two items remain open; both
-are named below and neither is a code defect.
+**Current phase:** Phase 1 — Foundation. **COMPLETE.** All thirteen exit criteria pass, including
+the cross-device acceptance test on two physical machines.
 
-The hosted Supabase project `omhktzxwffaipmcoljic` now carries the schema, and the app is live at
-**<https://contextshelf.vercel.app>**. The egress restriction recorded in the previous revision of
-this file no longer applies to HTTPS; a different and narrower restriction replaced it, described
-under "What the environment can and cannot reach".
+Live at **<https://contextshelf.vercel.app>**, backed by Supabase project `omhktzxwffaipmcoljic`.
+
+**Phase 2 is unblocked.** Start it on a `phase-2-memory` branch.
+
+One limitation is carried forward rather than closed: the OTP email templates cannot be set on the
+free tier, so a sign-in link stays bound to the device that requested it. Cross-device *data*
+continuity is proven and unaffected; only the sign-in link is device-bound. See "Carried into
+Phase 2".
 
 ---
 
@@ -32,7 +35,7 @@ These terms mean exactly this and nothing more:
 
 ---
 
-## Where Phase 1 stands
+## Where Phase 1 stands — CLOSED
 
 | # | Exit criterion | Status | Evidence |
 |---|---|---|---|
@@ -40,7 +43,7 @@ These terms mean exactly this and nothing more:
 | B | Authentication works | **Validated** | Sign-in driven through the app's own `/auth/confirm?token_hash=…` route against hosted Supabase Auth; lands on `/home` |
 | C | Data persists after refresh | **Validated** | Topic created through the UI survives a hard reload, and the row is asserted present in hosted Postgres |
 | D | Data persists after logout/login | **Validated** | Cookies cleared → bounced to `/login` → signed in again → data still present |
-| E | Same account, another client | **Validated for a second client; NOT cross-device** | A second, cookie-independent browser context at a different viewport sees the same shelf with no export/import. This is not the same as two physical machines — see "Not validated" |
+| E | Same account, another computer | **Cross-device validated** | Verified by the account holder on two physical machines: data created on the Work PC appeared on the Mac, and an update made on the Mac appeared back on the Work PC. No export, no import. Also holds for a second browser context at a different viewport |
 | F | Users cannot reach each other's data | **Hosted database validated** | `hosted/02_rls_isolation.sql` returns ALL HOSTED RLS CHECKS PASSED. Separately, a second signed-in account cannot see the first's topic in a listing and is refused its direct URL |
 | G | Topics work | **Validated** | Created through the real UI; row asserted in hosted Postgres |
 | H | Nested subtopics work | **Validated** | Subtopic created through the UI; row asserted in hosted Postgres |
@@ -50,17 +53,15 @@ These terms mean exactly this and nothing more:
 | L | Responsive desktop and mobile | **Validated** | 40 page/viewport combinations across 1440/1280/768/390/375, **0 skipped**. Two real touch-target defects were found and fixed |
 | M | Production deployment | **Deployed** | <https://contextshelf.vercel.app> — HTTPS, `/login` 200, `/`, `/home`, `/topics` correctly 307 to `/login` when signed out |
 
-**Two items remain open.** Neither is a code defect:
+**All thirteen criteria pass.** One limitation is carried forward and is not a code defect:
 
-1. **Cross-device (criterion E) is not validated.** It was exercised with two independent browser
-   contexts, not two physical machines. Only the account holder can complete the real test.
-2. **The OTP email templates are not set.** The Management API refuses with *"Email template
-   modification is not available for free tier projects using the default email provider."* This
-   is a plan limitation, not a configuration mistake, and it is not fixable from the dashboard
-   either. Consequence: Supabase sends its default PKCE-shaped link, which binds to the device
-   that requested it. `/auth/confirm` and `/auth/callback` accept both shapes, so nothing is
-   broken — but the Mac/Windows workflow AD-13 exists to serve needs either a paid plan or custom
-   SMTP before it is reliable.
+- **The OTP email templates are not set.** The Management API refuses with *"Email template
+  modification is not available for free tier projects using the default email provider."* This is
+  a plan limitation, not a configuration mistake, and it is not fixable from the dashboard either.
+  Consequence: Supabase sends its default PKCE-shaped link, which binds to the device that
+  requested it. `/auth/confirm` and `/auth/callback` accept both shapes, so sign-in works and
+  cross-device *data* continuity is proven — but the *link* must be opened on the device that
+  asked for it until a paid plan or custom SMTP is in place.
 
 ---
 
@@ -155,6 +156,8 @@ Problem, stack, sync model, IA, schema, ingestion, resume, layouts, roadmap, ris
 
 ### What was done
 - Applied the migration to `omhktzxwffaipmcoljic` and recorded migration history
+- Closed criterion E: the account holder ran the cross-device acceptance test on two physical
+  machines, both directions
 - Verified the hosted schema (15/15) and hosted RLS isolation (all checks passed, rolled back)
 - Confirmed catalog parity between the repository migrations and hosted
 - Created the Vercel project, set six environment variables across three targets, deployed
@@ -184,41 +187,35 @@ Problem, stack, sync model, IA, schema, ingestion, resume, layouts, roadmap, ris
 
 ## Not validated
 
-- **The same account on two physical machines.** Criterion E was exercised with two independent
-  browser contexts, which is not the same claim.
-- **Real magic-link email delivery.** Sign-in was driven through the app's own verification route
-  using a link generated by the admin API. No email was sent or clicked.
-- **Session persistence across a real browser restart.**
-- **Vercel's edge serving the authenticated pages.** The browser in this environment cannot reach
-  external HTTPS, so the end-to-end run used a local production build against hosted Supabase.
-  The deployment itself was verified over HTTP.
+Phase 1's criteria all pass. These are honest gaps in *coverage*, not open criteria:
+
+- **Real magic-link email delivery.** Sign-in was exercised through the app's own verification
+  route using a link generated by the admin API, and separately by the account holder on two
+  physical machines. No automated test sends or clicks an email.
+- **Session persistence across a browser restart** is untested by automation.
+- **Vercel's edge serving the authenticated pages.** The browser in the build environment cannot
+  reach external HTTPS, so the automated end-to-end run drove a local production build against
+  hosted Supabase. The deployment itself was verified over HTTP, and the account holder exercised
+  the real URL on two machines.
 - **Criterion K through the UI.** The supersede control is Phase 2; the SQL function is tested.
 
 ---
 
-## Remaining manual actions
+## Carried into Phase 2
 
-1. **Cross-device test.** Open <https://contextshelf.vercel.app> on a second physical machine,
-   sign in with the same address, and confirm the shelf matches. `docs/DEPLOYMENT.md` has the
-   script.
-2. **OTP email templates.** Blocked by the free tier: the Management API returns *"Email template
-   modification is not available for free tier projects using the default email provider."*
-   Needs a paid plan or custom SMTP. Until then, open the sign-in link on the device that
-   requested it.
-
----
-
-## Known issues / open items
-
-1. Realtime is not wired; cross-device updates need a refresh. Correctness is unaffected — the
-   database is authoritative. Phase 2.
-2. The supersede control is Phase 2 UI. The SQL function works and is tested.
-3. Export/import and the version-recovery UI are Phase 3.
-4. `entry_subtopics` / `session_subtopics` are guarded by a trigger rather than a composite FK,
+1. **OTP email templates.** Blocked by the free tier: *"Email template modification is not
+   available for free tier projects using the default email provider."* Needs a paid plan or
+   custom SMTP. Until then, open a sign-in link on the device that requested it. Data continuity
+   across devices is unaffected and proven.
+2. **Realtime is not wired**; cross-device updates need a refresh. Correctness is unaffected — the
+   database is authoritative.
+3. **The supersede control is Phase 2 UI.** The SQL function works and is tested.
+4. **Export/import and the version-recovery UI are Phase 3.**
+5. `entry_subtopics` / `session_subtopics` are guarded by a trigger rather than a composite FK,
    because they carry no `workspace_id` of their own.
-5. Migration history was written directly rather than by `db push`. A future `db push` from an
-   environment with Postgres access should be preceded by `supabase migration list` to confirm
-   the CLI agrees `0001` is applied.
+6. **Migration history was written directly** rather than by `db push`. A future `db push` from an
+   environment with Postgres access should be preceded by `supabase migration list` to confirm the
+   CLI agrees `0001` is applied.
 
 ---
 
@@ -236,20 +233,24 @@ Problem, stack, sync model, IA, schema, ingestion, resume, layouts, roadmap, ris
 | `hosted/02_rls_isolation.sql` | **ALL HOSTED RLS CHECKS PASSED**, rolled back |
 | `npm run validate:hosted` | **16/16 checks pass** |
 | Authenticated responsive QA | **40 combinations, 0 skipped, no layout failures** |
+| Cross-device acceptance test | **PASS** — Work PC ↔ Mac, both directions, by the account holder |
 
 ---
 
 ## Next task
 
-**Close Phase 1 by running the cross-device test**, then start Phase 2 on a `phase-2-memory`
-branch. Do not begin Phase 2 before that test passes — criterion E is the reason this product
-exists.
+**Phase 2 — Memory.** Start on a `phase-2-memory` branch. Phase 1 is closed and merged to `main`;
+`main` builds, typechecks, lints, and passes both test suites.
+
+Exit criteria for Phase 2 are in `docs/ARCHITECTURE.md` §13. Do not modify a Phase 1 guarantee
+without recording the supersession here, per the process at the bottom of `CLAUDE.md`.
 
 ---
 
 ## Resume trigger
 
 **IF** returning to ContextShelf development
-**THEN** the hosted project and the deployment both exist and are validated. The only Phase 1 work
-left is the cross-device test and, if cross-device sign-in is to be reliable, a plan or SMTP
-change for the OTP email templates. Everything else is done. Start Phase 2 on a branch.
+**THEN** Phase 1 is complete, validated, and merged. The hosted project and the deployment both
+exist and are proven, including cross-device continuity on two physical machines. Begin Phase 2 on
+a `phase-2-memory` branch, and read "Carried into Phase 2" above before planning — the email
+template limitation and the unwired realtime layer are both live constraints.
