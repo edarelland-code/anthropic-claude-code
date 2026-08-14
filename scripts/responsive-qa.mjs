@@ -35,6 +35,12 @@ const PAGES = [
   { path: '/topics/new', name: 'topic-new', auth: true },
   { path: '/inbox', name: 'inbox', auth: true },
   { path: '/settings', name: 'settings', auth: true },
+  // Phase 2 memory surfaces.
+  { path: '/timeline', name: 'timeline', auth: true },
+  { path: '/timeline?filter=decisions', name: 'timeline-filtered', auth: true },
+  { path: '/decisions', name: 'decisions', auth: true },
+  { path: '/ideas', name: 'ideas', auth: true },
+  { path: '/prompts', name: 'prompts', auth: true },
 ];
 
 const MIN_TOUCH = 40; // px; below this a control is awkward on a phone

@@ -269,7 +269,7 @@ try {
     const stillSkipped = Number((out.match(/(\d+) skipped/) ?? [])[1] ?? 0);
     record(
       'authenticated viewports audited',
-      qa.status === 0 && stillSkipped === 0 && audited >= 40,
+      qa.status === 0 && stillSkipped === 0 && audited >= 65,
       `${audited} combinations, ${stillSkipped} skipped`,
     );
   }
