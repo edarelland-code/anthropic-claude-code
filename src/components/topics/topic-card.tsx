@@ -17,7 +17,14 @@ export function TopicCard({ summary }: { summary: TopicSummary }) {
   return (
     <Link
       href={`/topics/${topic.id}`}
-      className="group flex flex-col rounded-lg p-4 transition-colors surface hover:border-indigo-300 dark:hover:border-indigo-500/40"
+      // `min-w-0` is load-bearing. A grid item defaults to `min-width: auto`,
+      // which refuses to shrink below its own min-content — so the widest
+      // unbreakable thing inside sets the card's floor, the track cannot
+      // compress it, and the page scrolls sideways. Measured at 406px against
+      // a 358px track, identically at both phone widths, which is what
+      // identified it. With this, the track is authoritative and the `truncate`
+      // and `line-clamp` rules below can finally do their job.
+      className="group flex min-w-0 flex-col rounded-lg p-4 transition-colors surface hover:border-indigo-300 dark:hover:border-indigo-500/40"
     >
       <div className="flex items-start gap-2">
         <h3 className="min-w-0 flex-1 truncate text-sm font-semibold">{topic.name}</h3>

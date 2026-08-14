@@ -94,6 +94,10 @@ added it, and `0004`'s view casts two of them.
 | 33 | Medium | The responsive audit flagged the search filter chips' visually-hidden radios as 1px touch targets, measuring the input rather than the 44px label that is actually tappable | The audit measures the associated label's box when a control is smaller than the minimum — and only when that label passes on its own |
 | 34 | **Medium — half the harness was blind** | `responsive-qa.mjs` carried its own copy of the browser launcher which knew nothing about the proxy, so it failed on URLs the harness spawning it fetched successfully | One launcher, shared |
 | 35 | Low | Four sidebar sections still carried "P2" badges after Phase 2 shipped, and Home promised Phase 3 features that already existed | Rule 14 cuts both ways; both corrected |
+| 36 | **Medium — a grid item that could not shrink** | `TopicCard` is a grid item, and a grid item defaults to `min-width: auto`, so it refuses to compress below its own min-content. Measured at 406px against a 358px track — identically at 390 and 375, which is what identified it as a fixed floor rather than a content effect | `min-w-0` on the card root, so the track is authoritative and the `truncate` rules inside can work |
+| 37 | Medium | Search result titles were 16px touch targets — an inline anchor around one line of text, the same defect Phase 2 fixed on the Timeline and the section pages | `inline-block min-h-11 py-2` with the padding negative-margined away, so the target grows without the layout moving |
+| 38 | **Medium — two wrong diagnoses before the right one** | The responsive audit named the first three elements past the viewport in document order, which are always the outermost containers. Every overflow therefore read as "the card is too wide", and the real culprit was guessed at — wrongly | It now reports the elements that exceed **their own parent's** content box, with width and min-content, which names the break point instead of describing the symptom |
+| 39 | **Medium — a validation run against a stale build** | A backgrounded `vercel --prod \| grep "ready."` swallowed the deploy's output, and because a pipeline's exit status is `tail`'s, the `&&` after it proceeded regardless. Two rounds of "the fix did not work" were actually the previous build | Deploys are checked unfiltered; the audit's class strings are what exposed it, since they still showed the old markup |
 
 ### The leakproof limit — a real, documented limitation
 
@@ -271,10 +275,25 @@ a bare `ERR_CONNECTION_RESET` on a URL `curl` fetches perfectly, with nothing in
 log. Read out of Chromium's own net log: a 1,733-byte ClientHello followed immediately by
 `ECONNRESET`.
 
-`scripts/chromium-path.mjs` caps at TLS 1.2 **when a proxy is configured**, which keeps the
-ClientHello inside one segment. Certificate verification is untouched — chain, hostname and expiry
-are all still checked, and a bad certificate still fails the run. The end-to-end validation now
-drives the **real deployed URL** rather than a local production build.
+A second, independent problem sits behind the same symptom: the proxy re-signs *some* hosts with
+its own CA and tunnels others through, and which is which changes between runs. A run that had
+been passing failed mid-way with `ERR_CERT_AUTHORITY_INVALID` when a host it had been tunnelling
+started being intercepted. Every other tool here is already told to trust that CA; Chromium reads
+none of those, only the NSS database, and populating that needs `certutil`, which is absent.
+
+`scripts/chromium-path.mjs` therefore does two things **when a proxy is configured**:
+
+- caps at TLS 1.2, keeping the ClientHello inside one segment;
+- passes the CA bundle's public-key fingerprints via
+  `--ignore-certificate-errors-spki-list`, computed from the bundle at launch so a rotated CA is
+  picked up and nothing can go stale.
+
+Despite its name that flag is not `--ignore-certificate-errors`: it names exact public keys to
+accept, which is what installing the CA would do. Nothing outside the bundle is trusted, chain,
+hostname and expiry are all still verified, and a bad certificate still fails the run.
+
+The end-to-end validation now drives the **real deployed URL** rather than a local production
+build.
 
 Three consequences, each with the workaround actually used:
 

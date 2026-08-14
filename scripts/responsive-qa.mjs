@@ -82,34 +82,48 @@ async function auditPage(page, vp, spec) {
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
   );
   if (overflow > 1) {
-    // Report the NARROWEST offending element, with its width, its own
-    // min-content width, and a little of its text.
+    // Report the elements that stick out of THEIR OWN PARENT, which is the
+    // only precise definition of where the layout breaks.
     //
-    // The previous version listed the first three elements past the edge in
-    // document order, which is almost always the outermost containers — so
-    // every overflow read as "the card is too wide" and the actual culprit had
-    // to be guessed at. Twice. The element that is genuinely at fault is the
-    // deepest, narrowest one that still overflows; and min-content is what
-    // says WHY, because an element wider than its container whose min-content
-    // equals its width is one that refused to shrink (a flex or grid item
-    // without min-w-0, almost every time).
+    // Two earlier versions of this got it wrong in opposite directions.
+    // Listing the first elements past the viewport in document order named the
+    // outermost containers, so every overflow read as "the card is too wide".
+    // Listing the narrowest named leaves — a 19px "0%", a 2px SVG circle —
+    // that were merely carried past the edge by an ancestor. Neither points at
+    // the element to fix.
+    //
+    // An element wider than its parent's content box is the break point, and
+    // min-content says why: when it equals the width, the element refused to
+    // shrink, which is a flex or grid item without min-w-0 almost every time.
     const culprits = await page.evaluate((limit) => {
-      const over = [];
+      const out = [];
       for (const el of document.querySelectorAll('body *')) {
         const r = el.getBoundingClientRect();
-        if (r.width > 0 && r.right > limit + 1) over.push({ el, r });
-      }
-      over.sort((a, b) => a.r.width - b.r.width);
-      return over.slice(0, 3).map(({ el, r }) => {
+        if (r.width === 0 || r.right <= limit + 1) continue;
+        const parent = el.parentElement;
+        if (!parent) continue;
+        const pr = parent.getBoundingClientRect();
+        const ps = getComputedStyle(parent);
+        const inner = pr.right - parseFloat(ps.paddingRight || '0') - parseFloat(ps.borderRightWidth || '0');
+        if (r.right <= inner + 1) continue; // carried along, not the break
+
         const probe = el.style.width;
         el.style.width = 'min-content';
         const min = Math.round(el.getBoundingClientRect().width);
         el.style.width = probe;
-        const cls = (el.className || '').toString().slice(0, 48);
-        const text = (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 28);
-        return `${el.tagName.toLowerCase()}.${cls} w=${Math.round(r.width)} min=${min} "${text}"`;
-      });
+
+        const cls = (el.className || '').toString().slice(0, 44);
+        const text = (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 26);
+        out.push(
+          `${el.tagName.toLowerCase()}.${cls} w=${Math.round(r.width)} min=${min} ` +
+          `parent=${parent.tagName.toLowerCase()}.${(parent.className || '').toString().slice(0, 28)} ` +
+          `(${Math.round(inner - pr.left)}) "${text}"`,
+        );
+        if (out.length >= 3) break;
+      }
+      return out.length ? out : ['no element exceeds its parent — the page itself is wider than the viewport'];
     }, vp.width);
+
     fail(`${spec.name} @ ${vp.name}: ${overflow}px horizontal overflow — ${culprits.join(' | ')}`);
   }
 

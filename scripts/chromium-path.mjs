@@ -12,7 +12,8 @@
  * Chromium the image does provide. Returns null when the default is fine, which
  * is what `launch()` wants for `executablePath`.
  */
-import { existsSync, readdirSync } from 'node:fs';
+import { X509Certificate, createHash } from 'node:crypto';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 const ROOTS = [process.env.PLAYWRIGHT_BROWSERS_PATH, '/opt/pw-browsers'].filter(Boolean);
@@ -51,9 +52,57 @@ export function chromiumExecutable() {
 }
 
 /**
+ * The public-key fingerprints of the CA bundle this environment provides.
+ *
+ * The proxy re-signs some hosts with its own CA and passes others through, and
+ * which is which can change between runs — a validation run that succeeded an
+ * hour earlier failed mid-way with ERR_CERT_AUTHORITY_INVALID when a host it
+ * had been tunnelling started being intercepted. Every other tool here is
+ * already told to trust that CA (curl through CURL_CA_BUNDLE, Node through
+ * NODE_EXTRA_CA_CERTS, the JVM through its truststore). Chromium reads none of
+ * them: it reads the NSS database, and populating that needs `certutil`, which
+ * is not installed.
+ *
+ * `--ignore-certificate-errors-spki-list` is the lever Chromium does give.
+ * Despite the name it is not `--ignore-certificate-errors`: it names EXACT
+ * public keys to accept and disables nothing globally, which is the same thing
+ * installing the CA would do.
+ *
+ * Read from the bundle at launch rather than hard-coded, so a rotated CA is
+ * picked up automatically and no fingerprint can go stale. Nothing outside
+ * that bundle is trusted, and if the bundle is absent nothing is pinned.
+ */
+function caBundleSpki() {
+  const path =
+    process.env.NODE_EXTRA_CA_CERTS ??
+    process.env.CURL_CA_BUNDLE ??
+    process.env.SSL_CERT_FILE ??
+    '/root/.ccr/ca-bundle.crt';
+  if (!existsSync(path)) return [];
+  let pem;
+  try {
+    pem = readFileSync(path, 'utf8');
+  } catch {
+    return [];
+  }
+  const blocks = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? [];
+  const out = new Set();
+  for (const block of blocks) {
+    try {
+      const spki = new X509Certificate(block).publicKey.export({ type: 'spki', format: 'der' });
+      out.add(createHash('sha256').update(spki).digest('base64'));
+    } catch {
+      // A bundle entry Node cannot parse is skipped rather than fatal — the
+      // rest of the bundle is still worth trusting.
+    }
+  }
+  return [...out];
+}
+
+/**
  * Launch options that work whether or not the pinned build is present.
  *
- * Two accommodations, both needed only because the sandbox reaches the
+ * Three accommodations, all needed only because the sandbox reaches the
  * internet through a proxy.
  *
  * 1. Chromium does not read HTTPS_PROXY. Without being told, it fails every
@@ -78,10 +127,14 @@ export function chromiumExecutable() {
  *    hostname and expiry are all still checked, and a bad certificate still
  *    fails the run. It is applied only when a proxy is configured, so a normal
  *    machine negotiates TLS 1.3 as usual.
+ *
+ * 3. Chromium does not trust the proxy's CA, because it reads NSS and nothing
+ *    else. See caBundleSpki() above.
  */
 export function launchOptions(extra = {}) {
   const executablePath = chromiumExecutable();
   const proxyServer = process.env.HTTPS_PROXY ?? process.env.https_proxy ?? null;
+  const spki = proxyServer ? caBundleSpki() : [];
   return {
     ...(executablePath ? { executablePath } : {}),
     ...(proxyServer
@@ -91,6 +144,7 @@ export function launchOptions(extra = {}) {
       '--no-sandbox',
       '--disable-dev-shm-usage',
       ...(proxyServer ? ['--ssl-version-max=tls1.2'] : []),
+      ...(spki.length ? [`--ignore-certificate-errors-spki-list=${spki.join(',')}`] : []),
     ],
     ...extra,
   };
