@@ -160,8 +160,19 @@ export function SearchResults({
                   </time>
                 </div>
 
-                <h3 className="mt-1 text-sm font-medium leading-6 break-words">
-                  <Link href={hrefFor(hit)} className="hover:underline">
+                {/*
+                  The link is the touch target, so it has to be one. An inline
+                  anchor around a single line of 16px text is a 16px target,
+                  which is the same defect Phase 2 fixed on the Timeline and the
+                  section pages. `inline-block` keeps long titles wrapping;
+                  the padding is negative-margined away so the hit area grows
+                  without the layout moving.
+                */}
+                <h3 className="mt-0.5 text-sm font-medium leading-6 break-words">
+                  <Link
+                    href={hrefFor(hit)}
+                    className="-my-2 inline-block min-h-11 py-2 hover:underline"
+                  >
                     {hit.title}
                   </Link>
                 </h3>

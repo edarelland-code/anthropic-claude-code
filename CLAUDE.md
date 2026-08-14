@@ -66,6 +66,12 @@ These are permanent. Changing one requires the process at the bottom of this fil
 16. **Mutable scalar updates use optimistic concurrency** (`WHERE updated_at = <read value>`);
     zero rows affected surfaces a conflict to the user instead of clobbering.
 17. **Duplicate/conflict detection proposes; the user confirms.** Never silently merge.
+17b. **Suggested is not Confirmed.** Deterministic keyword and recency matching may propose a
+    topic, a knowledge type, a duplicate or a conflict. It must never be presented as
+    understanding. A suggestion carries the literal evidence that produced it, is typed as a
+    `Suggestion<T>` rather than a `T` so a caller has to reach through it, and never becomes
+    authoritative without a person confirming it. In a list of proposals, what the source *stated*
+    is pre-selected; what was *guessed* is not.
 17a. **Never surface a raw driver error.** Everything thrown by the data layer goes through
     `toUserFacingError()`; the detail is logged server-side, the user gets an actionable
     sentence. Never fail silently either — every failure path renders something.
@@ -80,6 +86,10 @@ These are permanent. Changing one requires the process at the bottom of this fil
     persist → classify. New sources are new adapters, never new write paths.
 21. **No single-file HTML artifact. No monolithic JSON blob.** Normalized relational modeling.
 22. **`src/lib/resume/assemble.ts` stays a pure function** so its guarantees are testable.
+22a. **Capture is one step.** Quick Capture requires content and nothing else — no topic,
+    subtopic, knowledge type, source, tag or classification before saving. The Inbox exists so
+    capture never interrupts the work it is capturing; anything that made the user stop and decide
+    would defeat it. Those all remain optional, during triage.
 
 ### UI
 23. **Color signals knowledge type, not decoration.** Source badges are secondary and monochrome.
@@ -114,6 +124,8 @@ These are permanent. Changing one requires the process at the bottom of this fil
 | AD-15 | **Hosted verification runs over the Management API when the Postgres wire protocol is unreachable** | Some environments permit HTTPS but not `:5432`/`:6543`. `db push` and `db diff --linked` then cannot run at all. The migration, the two hosted suites, and schema parity all work over HTTPS instead, so "the hosted database is correct" stays checkable rather than assumed. The CLI path remains preferred wherever it works |
 | AD-16 | **Hosted validation asserts rows in the database, never only rendered text** | A page-content check reported two knowledge entries created while `knowledge_entries` was empty — the submit had hit a different form on the same page and created an action. Text on a page is evidence the app rendered something; only the row is evidence of persistence |
 | AD-17 | **Derived read models are database VIEWS with `security_invoker = true`, never materialised tables** | The Timeline and the prompt outcome/winner projections hold nothing of their own, so they cannot drift from the rows they summarise. `security_invoker` is load-bearing rather than decorative: a view runs as its OWNER by default and would read straight past RLS on every underlying table, serving one workspace's history to another while appearing to work. Asserted, not assumed — removing it makes `04_timeline.test.sql` fail with a real leak |
+| AD-19 | **Retrieval is one `security_invoker` projection plus a deterministic ranking function, and never a stored copy of a derived read** | Search has to reach Current State and Master Topic Memory, both of which are computed on read (rule 8, AD-8). Indexing them would mean storing them, which is the one thing AD-8 forbids — so the *authoritative columns they are assembled from* carry the search vectors instead, `topics.current_state` and `topics.goal` among them. `context_snapshots` participate as history, and every hit reports whether it is `current`, `historical` or a `snapshot`, so a saved rendering is never mistaken for the live answer. Ranking is `ts_rank_cd` with fixed state multipliers and a total-order tiebreak, so paging cannot drop or repeat a row and the same query always ranks the same |
+| AD-20 | **A function that MUTATES rows dispatches on an explicit allowlist of statically compiled statements, never on an interpolated table name** | `entity_exists()` interpolates through `format(%I)` safely only because the enum constrains its input — a guarantee that lives in the type, not the function. For a function that writes, that is too much trust to place in an argument: adding an enum value later, or any future overload taking `text`, would silently widen what a caller can write to. `soft_delete_record()` therefore has one `UPDATE` per supported type and no code path that builds a name. Append-only history, Layer 1 evidence, inbox captures and derived snapshots are each refused explicitly, with their own message |
 | AD-18 | **Judgements about a record are appended, never written onto it** | Prompt outcomes and winning-version selections each live in their own append-only table, ordered by an identity sequence — not by `created_at`, which is fixed for a whole transaction and silently degrades to comparing random uuids. Re-rating appends, so a changed judgement is history rather than an overwrite, exactly as superseding is for decisions. The seeding rule keeps this from becoming two sources of truth: a row is written whenever the parent is created, so the newest row is always the answer with no fallback |
 
 ---
@@ -153,6 +165,7 @@ npm run test         # vitest — domain logic, error sanitising, adapter mappin
 npm run test:db      # real ephemeral Postgres: migration + RLS + history guarantees
 npm run test:responsive -- <url>   # real Chromium at 1440/1280/768/390/375
 npm run db:push      # apply supabase/migrations to the linked project
+npm run db:push:hosted             # same, over the Management API when :5432 is unreachable (AD-15)
 npm run db:types     # regenerate adapter-internal DB types
 
 npm run provision            # the whole hosted sequence: link, migrate, verify, deploy
@@ -163,6 +176,11 @@ npm run validate:hosted -- <url>   # auth, persistence, isolation, provenance, a
 All five of `build`, `typecheck`, `lint`, `test`, and `test:db` must pass before merging to
 `main`.
 
+**Query plans are read as the `authenticated` role, never as the table owner.** The owner bypasses
+row-level security, so it gets plans no real user will ever get — an index can be perfectly built,
+perfectly used by the owner, and unreachable for everyone else. `supabase/tests/07_performance.test.sql`
+exists because that had been true of the full-text index since Phase 0 without anyone noticing.
+
 ## Layout
 
 ```
@@ -171,7 +189,7 @@ src/components/     ui/ primitives · layout/ shell · topics/ · knowledge/
 src/lib/domain/     hand-written vendor-neutral types + enums  ← start here
 src/lib/ports/      repository interfaces (no vendor names)
 src/lib/adapters/   supabase/ — the ONLY place the vendor SDK appears
-src/lib/ingestion/  adapters → normalizer → persister
+src/lib/ingestion/  adapters → extract (deterministic) → classify (suggests only) → persist
 src/lib/resume/     pure context assembler
 supabase/migrations/  checked-in SQL — never change schema from the dashboard
 supabase/tests/     SQL suites run by npm run test:db against a real cluster

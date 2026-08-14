@@ -82,16 +82,33 @@ async function auditPage(page, vp, spec) {
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
   );
   if (overflow > 1) {
+    // Report the NARROWEST offending element, with its width, its own
+    // min-content width, and a little of its text.
+    //
+    // The previous version listed the first three elements past the edge in
+    // document order, which is almost always the outermost containers — so
+    // every overflow read as "the card is too wide" and the actual culprit had
+    // to be guessed at. Twice. The element that is genuinely at fault is the
+    // deepest, narrowest one that still overflows; and min-content is what
+    // says WHY, because an element wider than its container whose min-content
+    // equals its width is one that refused to shrink (a flex or grid item
+    // without min-w-0, almost every time).
     const culprits = await page.evaluate((limit) => {
-      const out = [];
+      const over = [];
       for (const el of document.querySelectorAll('body *')) {
         const r = el.getBoundingClientRect();
-        if (r.width > 0 && r.right > limit + 1) {
-          out.push(`${el.tagName.toLowerCase()}.${(el.className || '').toString().slice(0, 60)}`);
-        }
-        if (out.length >= 3) break;
+        if (r.width > 0 && r.right > limit + 1) over.push({ el, r });
       }
-      return out;
+      over.sort((a, b) => a.r.width - b.r.width);
+      return over.slice(0, 3).map(({ el, r }) => {
+        const probe = el.style.width;
+        el.style.width = 'min-content';
+        const min = Math.round(el.getBoundingClientRect().width);
+        el.style.width = probe;
+        const cls = (el.className || '').toString().slice(0, 48);
+        const text = (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 28);
+        return `${el.tagName.toLowerCase()}.${cls} w=${Math.round(r.width)} min=${min} "${text}"`;
+      });
     }, vp.width);
     fail(`${spec.name} @ ${vp.name}: ${overflow}px horizontal overflow — ${culprits.join(' | ')}`);
   }
