@@ -209,7 +209,64 @@ begin
   end;
   perform t.assert(blocked, 'a decision was superseded with a null reason by direct UPDATE');
 
-  raise notice 'Timeline: all record types project, ordering holds, soft deletes drop out, and user B sees none of user A''s rows through the view. Decision supersession preserves both sides and requires a reason.';
+  -- --- 9. Prompt outcomes are append-only and latest-wins ----------------
+  insert into prompt_version_outcomes (prompt_version_id, workspace_id, user_id, result, rating)
+  values (a_version, a_ws, a_id, 'partially_worked', 3);
+
+  perform t.assert(
+    (select result from prompt_version_current_outcome where prompt_version_id = a_version)
+      = 'partially_worked',
+    'the newest outcome is not the current one'
+  );
+
+  insert into prompt_version_outcomes (prompt_version_id, workspace_id, user_id, result, rating)
+  values (a_version, a_ws, a_id, 'failed', 1);
+
+  perform t.assert(
+    (select result from prompt_version_current_outcome where prompt_version_id = a_version) = 'failed',
+    're-rating did not take effect'
+  );
+  select count(*) into n from prompt_version_outcomes where prompt_version_id = a_version;
+  perform t.assert(n = 2, format('expected both judgements to survive, found %s', n));
+
+  -- The version body itself is untouched by any of this.
+  perform t.assert(
+    (select body from prompt_versions where id = a_version) = 'secret prompt body',
+    'the prompt body changed while recording an outcome'
+  );
+
+  -- Append-only: no UPDATE or DELETE is possible, as for the other two.
+  blocked := false;
+  begin
+    update prompt_version_outcomes set result = 'worked' where prompt_version_id = a_version;
+    blocked := not found;
+  exception when others then blocked := true;
+  end;
+  perform t.assert(blocked, 'a prompt outcome was updated');
+
+  blocked := false;
+  begin
+    delete from prompt_version_outcomes where prompt_version_id = a_version;
+    blocked := not found;
+  exception when others then blocked := true;
+  end;
+  perform t.assert(blocked, 'a prompt outcome was deleted');
+
+  -- The timeline reports the current outcome, not the seed column.
+  perform t.assert(
+    (select status from timeline_events where id = a_version) = 'failed',
+    'the timeline shows the version''s seed result rather than its current outcome'
+  );
+
+  -- --- 10. Outcomes do not leak across workspaces ------------------------
+  perform t.login(b_id);
+  select count(*) into n from prompt_version_outcomes;
+  perform t.assert(n = 0, format('LEAK: user B sees %s of user A''s prompt outcomes', n));
+  select count(*) into n from prompt_version_current_outcome;
+  perform t.assert(n = 0, 'LEAK: user B reads user A''s outcomes through the view');
+  perform t.login(a_id);
+
+  raise notice 'Timeline: all record types project, ordering holds, soft deletes drop out, and user B sees none of user A''s rows through the view. Decision supersession preserves both sides and requires a reason. Prompt outcomes append, latest wins, bodies stay immutable, and neither leaks.';
 end $$;
 
 rollback;

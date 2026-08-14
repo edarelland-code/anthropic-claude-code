@@ -230,11 +230,16 @@ export interface PromptRepository {
     notes?: string | null;
     result?: PromptVersion['result'];
   }): Promise<PromptVersion>;
+  /**
+   * Appends an outcome. Never mutates the version — re-rating adds a row, so a
+   * changed judgement is history rather than an overwrite (migration 0002 §4).
+   */
   rateVersion(input: {
     versionId: string;
     result: PromptVersion['result'];
     rating?: number;
     notes?: string | null;
+    outputSummary?: string | null;
   }): Promise<PromptVersion>;
   markWinning(promptId: string, isWinning: boolean): Promise<void>;
 }

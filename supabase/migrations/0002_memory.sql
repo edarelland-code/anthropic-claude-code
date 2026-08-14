@@ -1,7 +1,8 @@
 -- ContextShelf — Phase 2 (Memory)
 --
--- Additive only. This migration creates no table, drops nothing, and rewrites
--- no existing row: Phase 0 already modelled decisions, ideas, prompts,
+-- Additive only. This migration drops nothing and rewrites
+-- no existing row; the one table it adds did not exist. Phase 0 already
+-- modelled decisions, ideas, prompts,
 -- prompt_versions, relationships, and context_snapshots, and Phase 1 applied
 -- them. What was missing was three decision states, the integrity that makes
 -- CLAUDE.md rule 7 a database guarantee rather than a convention, and a
@@ -11,8 +12,9 @@
 --   1. decision_status gains 'proposed', 'rejected', 'archived'
 --   2. supersede_decision() — transactional, reason mandatory
 --   3. A CHECK so a superseded decision cannot exist without its reason
---   4. timeline_events — a security_invoker view over eight record types
---   5. Indexes for timeline ordering
+--   4. prompt_version_outcomes — append-only ratings, so rule 6 stands
+--   5. timeline_events — a security_invoker view over eight record types
+--   6. Indexes for timeline ordering
 --
 -- Safe to run against a database holding production data. Every statement is
 -- guarded (IF NOT EXISTS / CREATE OR REPLACE) so re-running is a no-op.
@@ -155,7 +157,106 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------------
--- 4. timeline_events
+-- 4. prompt_version_outcomes — how a version performed
+--
+-- Phase 0 gave prompt_versions result/rating/notes columns, but Phase 1 gave
+-- the table SELECT and INSERT policies only, so those columns can be written
+-- once and never revised. Whether a prompt worked is learned after its body is
+-- written, and a rating is exactly the kind of judgement that gets corrected
+-- later, so the columns as they stand cannot carry the feature.
+--
+-- Rule 6 is not weakened to make room. This table is append-only on the same
+-- terms: SELECT and INSERT policies, no UPDATE, no DELETE. Re-rating a version
+-- appends a row, so "I first thought it worked, then found it only partly did"
+-- survives as history rather than overwriting the earlier judgement — which is
+-- the same reason decisions are superseded rather than edited.
+--
+-- On sources of truth: the effective outcome is ALWAYS the highest-seq row here.
+-- There is no fallback to the columns on prompt_versions, because a rule of the
+-- form "this column unless that table has a row" is the ambiguity this design
+-- exists to avoid. The application seeds an outcome row whenever it creates a
+-- version, so the table is complete. The legacy columns are left in place for
+-- rows written before this migration and are not read.
+-- ---------------------------------------------------------------------------
+
+-- Needed for the composite foreign key below (AD-11).
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'prompt_versions'::regclass and conname = 'prompt_versions_id_workspace_uk'
+  ) then
+    alter table prompt_versions add constraint prompt_versions_id_workspace_uk unique (id, workspace_id);
+  end if;
+end $$;
+
+create table if not exists prompt_version_outcomes (
+  id                 uuid primary key default gen_random_uuid(),
+  -- Ordering is by seq, never by created_at. now() is fixed for the whole
+  -- transaction, so two outcomes recorded together carry identical timestamps
+  -- and "newest" would fall back to comparing random uuids. A monotonic
+  -- sequence is also immune to clock skew between writers.
+  seq                bigint generated always as identity,
+  prompt_version_id  uuid not null,
+  workspace_id       uuid not null references workspaces(id) on delete cascade,
+  user_id            uuid references auth.users(id) on delete set null,
+  result             prompt_result not null,
+  rating             smallint check (rating is null or (rating >= 1 and rating <= 5)),
+  notes              text,
+  output_summary     text,
+  created_at         timestamptz not null default now(),
+  -- AD-11: the row's own workspace_id must match the version's, or a member of
+  -- workspace B could attach an outcome to a version in workspace A and the
+  -- with-check would still pass.
+  constraint prompt_version_outcomes_version_fk
+    foreign key (prompt_version_id, workspace_id)
+    references prompt_versions (id, workspace_id) on delete cascade
+);
+
+create index if not exists prompt_version_outcomes_version_idx
+  on prompt_version_outcomes (prompt_version_id, seq desc);
+create index if not exists prompt_version_outcomes_workspace_idx
+  on prompt_version_outcomes (workspace_id, created_at desc);
+
+alter table prompt_version_outcomes enable row level security;
+
+do $$
+begin
+  if not exists (select 1 from pg_policies where tablename = 'prompt_version_outcomes' and policyname = 'prompt_version_outcomes_read') then
+    create policy prompt_version_outcomes_read on prompt_version_outcomes
+      for select using (is_workspace_member(workspace_id));
+  end if;
+  if not exists (select 1 from pg_policies where tablename = 'prompt_version_outcomes' and policyname = 'prompt_version_outcomes_insert') then
+    create policy prompt_version_outcomes_insert on prompt_version_outcomes
+      for insert with check (is_workspace_member(workspace_id));
+  end if;
+end $$;
+
+-- No UPDATE or DELETE policy, and none granted: append-only, like the two
+-- history tables rule 6 names.
+grant select, insert on prompt_version_outcomes to authenticated, service_role;
+revoke update, delete on prompt_version_outcomes from authenticated, service_role;
+revoke all on prompt_version_outcomes from anon;
+
+/** The current outcome of every version: the newest row, one per version. */
+create or replace view prompt_version_current_outcome with (security_invoker = true) as
+  select distinct on (o.prompt_version_id)
+    o.prompt_version_id,
+    o.workspace_id,
+    o.result,
+    o.rating,
+    o.notes,
+    o.output_summary,
+    o.created_at,
+    o.seq
+  from prompt_version_outcomes o
+  order by o.prompt_version_id, o.seq desc;
+
+grant select on prompt_version_current_outcome to authenticated, service_role;
+revoke all on prompt_version_current_outcome from anon;
+
+-- ---------------------------------------------------------------------------
+-- 5. timeline_events
 --
 -- The Timeline is a projection, never a store. A materialised copy would be a
 -- second source of truth and would drift from the rows it summarises; this view
@@ -245,14 +346,15 @@ create or replace view timeline_events with (security_invoker = true) as
     'prompt_version'::entity_type,
     case when p.is_winning and p.current_version_id = pv.id then 'winning_prompt' else 'prompt' end,
     p.title || ' (v' || pv.version || ')',
-    coalesce(pv.output_summary, pv.notes, left(pv.body, 280)),
+    coalesce(o.output_summary, pv.output_summary, o.notes, pv.notes, left(pv.body, 280)),
     p.source_type,
-    pv.result::text,
+    coalesce(o.result, pv.result)::text,
     null::uuid,
     pv.created_at,
     pv.created_at
   from prompt_versions pv
   join prompts p on p.id = pv.prompt_id
+  left join prompt_version_current_outcome o on o.prompt_version_id = pv.id
   where p.deleted_at is null
 
   union all
@@ -334,7 +436,7 @@ grant select on timeline_events to authenticated, service_role;
 revoke all on timeline_events from anon;
 
 -- ---------------------------------------------------------------------------
--- 5. Indexes for the projection
+-- 6. Indexes for the projection
 --
 -- knowledge_entries, decisions, and source_sessions already carry the
 -- topic-scoped ordering indexes they need. These fill the gaps, and add the

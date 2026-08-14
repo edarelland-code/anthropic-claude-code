@@ -50,6 +50,24 @@ import * as map from './mappers';
 
 type Row = Record<string, unknown>;
 
+/**
+ * Applies a version's current outcome over its stored columns.
+ *
+ * prompt_version_outcomes is authoritative; the columns on prompt_versions are
+ * the seed written when the version was created (migration 0002 §4).
+ */
+function overlay(version: Row, outcomes: Map<string, Row>): Row {
+  const o = outcomes.get(String(version.id));
+  if (!o) return version;
+  return {
+    ...version,
+    result: o.result,
+    rating: o.rating,
+    notes: o.notes ?? version.notes,
+    output_summary: o.output_summary ?? version.output_summary,
+  };
+}
+
 /** Phase gate: never silently no-op a write that is not built yet (CLAUDE.md rule 14). */
 class NotYetImplemented extends Error {
   constructor(what: string, phase: number) {
@@ -1025,10 +1043,15 @@ class SupabasePrompts implements PromptRepository {
       .eq('topic_id', topicId)
       .is('deleted_at', null);
     if (error) throw new Error(`list prompts: ${error.message}`);
-    return (data ?? []).map((r) => {
-      const row = r as Row;
+    const rows = (data ?? []) as Row[];
+    const outcomes = await this.outcomesFor(
+      rows.flatMap((r) => (Array.isArray(r.prompt_versions) ? (r.prompt_versions as Row[]) : [])),
+    );
+    return rows.map((row) => {
       const versions = Array.isArray(row.prompt_versions)
-        ? (row.prompt_versions as Row[]).map(map.toPromptVersion).sort((a, b) => b.version - a.version)
+        ? (row.prompt_versions as Row[])
+            .map((v) => map.toPromptVersion(overlay(v, outcomes)))
+            .sort((a, b) => b.version - a.version)
         : [];
       return { prompt: map.toPrompt(row), current: versions[0] ?? null };
     });
@@ -1042,9 +1065,11 @@ class SupabasePrompts implements PromptRepository {
     if (error) throw new Error(`get prompt: ${error.message}`);
     if (!data) return null;
     const row = data as unknown as Row;
-    const versions = Array.isArray(row.prompt_versions)
-      ? (row.prompt_versions as Row[]).map(map.toPromptVersion).sort((a, b) => b.version - a.version)
-      : [];
+    const raw = Array.isArray(row.prompt_versions) ? (row.prompt_versions as Row[]) : [];
+    const outcomes = await this.outcomesFor(raw);
+    const versions = raw
+      .map((v) => map.toPromptVersion(overlay(v, outcomes)))
+      .sort((a, b) => b.version - a.version);
     return { prompt: map.toPrompt(row), versions };
   }
   async create(input: {
@@ -1108,7 +1133,14 @@ class SupabasePrompts implements PromptRepository {
       'set current prompt version',
     );
 
-    return { prompt: map.toPrompt(withCurrent), version: map.toPromptVersion(versionRow) };
+    await this.recordOutcome({
+      versionId: String(versionRow.id),
+      workspaceId: String(workspaceId),
+      userId: userData.user.id,
+      result: 'untested',
+    });
+
+    return { prompt: map.toPrompt(withCurrent), version: await this.withCurrentOutcome(versionRow) };
   }
 
   /**
@@ -1162,30 +1194,123 @@ class SupabasePrompts implements PromptRepository {
       'add prompt version',
     );
 
+    // Seed the outcome so the outcomes table is complete for every version.
+    // Without this, "newest outcome row" would have to fall back to the version
+    // columns, and a rule of the form "this column unless that table has a row"
+    // is exactly the ambiguity the separate table exists to avoid.
+    await this.recordOutcome({
+      versionId: String(row.id),
+      workspaceId: String((promptRow as Row).workspace_id),
+      userId: userData.user.id,
+      result: input.result ?? 'untested',
+      notes: input.notes ?? null,
+    });
+
     await this.db
       .from('prompts')
       .update({ current_version_id: row.id })
       .eq('id', input.promptId);
 
-    return map.toPromptVersion(row);
+    return this.withCurrentOutcome(row);
   }
 
   /**
-   * Records how a version performed.
+   * Records how a version performed, by appending an outcome.
    *
-   * Blocked on a rule decision, not on implementation. prompt_versions carries
-   * result/rating/notes columns, but CLAUDE.md rule 6 makes the table
-   * insert-only through the absence of an UPDATE policy — and
-   * hosted/01_verify_schema.sql asserts that absence. Whether a prompt worked
-   * is learned after the body is written, so the two cannot both hold as
-   * stated. Failing loudly here beats silently updating zero rows, which is
-   * what an UPDATE against this table actually does today.
+   * prompt_versions stays insert-only (rule 6), so this never touches the
+   * version row. Re-rating appends again and the newest row wins, which keeps
+   * "I thought it worked, then found it only partly did" as history rather than
+   * overwriting the earlier judgement.
    */
-  async rateVersion(): Promise<PromptVersion> {
-    throw new NotYetImplemented(
-      'Rating an existing prompt version (rule 6 makes prompt_versions insert-only; a result can be set when the version is added)',
-      2,
+  async rateVersion(input: {
+    versionId: string;
+    result: PromptVersion['result'];
+    rating?: number;
+    notes?: string | null;
+    outputSummary?: string | null;
+  }): Promise<PromptVersion> {
+    if (input.rating !== undefined && (input.rating < 1 || input.rating > 5)) {
+      throw new Error('A rating must be between 1 and 5.');
+    }
+    const { data: userData } = await this.db.auth.getUser();
+    if (!userData.user) throw new Error('not signed in');
+
+    const { data: versionRow, error: versionErr } = await this.db
+      .from('prompt_versions')
+      .select('*')
+      .eq('id', input.versionId)
+      .single();
+    if (versionErr) throw new Error(`rate prompt version: ${versionErr.message}`);
+
+    await this.recordOutcome({
+      versionId: input.versionId,
+      workspaceId: String((versionRow as Row).workspace_id),
+      userId: userData.user.id,
+      result: input.result,
+      rating: input.rating,
+      notes: input.notes,
+      outputSummary: input.outputSummary,
+    });
+
+    return this.withCurrentOutcome(versionRow as Row);
+  }
+
+  /** Current outcomes for a set of versions, keyed by version id. */
+  private async outcomesFor(versions: Row[]): Promise<Map<string, Row>> {
+    const ids = versions.map((v) => String(v.id)).filter(Boolean);
+    if (!ids.length) return new Map();
+    const { data } = await this.db
+      .from('prompt_version_current_outcome')
+      .select('*')
+      .in('prompt_version_id', ids);
+    return new Map(
+      ((data ?? []) as Row[]).map((o) => [String(o.prompt_version_id), o]),
     );
+  }
+
+  /** Appends an outcome row. The newest row for a version is its result. */
+  private async recordOutcome(input: {
+    versionId: string;
+    workspaceId: string;
+    userId: string;
+    result: PromptVersion['result'];
+    rating?: number;
+    notes?: string | null;
+    outputSummary?: string | null;
+  }): Promise<void> {
+    const { error } = await this.db.from('prompt_version_outcomes').insert({
+      prompt_version_id: input.versionId,
+      workspace_id: input.workspaceId,
+      user_id: input.userId,
+      result: input.result,
+      rating: input.rating ?? null,
+      notes: input.notes ?? null,
+      output_summary: input.outputSummary ?? null,
+    });
+    if (error) throw new Error(`record prompt outcome: ${error.message}`);
+  }
+
+  /**
+   * Overlays a version row with its current outcome.
+   *
+   * The outcome table is authoritative; the columns on prompt_versions are the
+   * seed written at creation and are not read once an outcome row exists.
+   */
+  private async withCurrentOutcome(versionRow: Row): Promise<PromptVersion> {
+    const { data } = await this.db
+      .from('prompt_version_current_outcome')
+      .select('*')
+      .eq('prompt_version_id', versionRow.id as string)
+      .maybeSingle();
+    const outcome = data as Row | null;
+    if (!outcome) return map.toPromptVersion(versionRow);
+    return map.toPromptVersion({
+      ...versionRow,
+      result: outcome.result,
+      rating: outcome.rating,
+      notes: outcome.notes ?? versionRow.notes,
+      output_summary: outcome.output_summary ?? versionRow.output_summary,
+    });
   }
 
   async markWinning(promptId: string, isWinning: boolean): Promise<void> {

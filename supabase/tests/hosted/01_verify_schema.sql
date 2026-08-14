@@ -13,13 +13,13 @@ with expected_tables(name) as (
          ('knowledge_entry_versions'),('decisions'),('ideas'),('prompts'),('prompt_versions'),
          ('file_references'),('actions'),('milestones'),('relationships'),('tags'),
          ('taggables'),('context_snapshots'),('ingestion_records'),('ingestion_tokens'),
-         ('deletion_log')
+         ('deletion_log'),('prompt_version_outcomes')
 ),
 checks as (
 
   select 1 as ord, 'tables present' as check_name,
-         count(*)::text || ' / 24' as result,
-         case when count(*) = 24 then 'PASS' else 'FAIL: missing ' ||
+         count(*)::text || ' / 25' as result,
+         case when count(*) = 25 then 'PASS' else 'FAIL: missing ' ||
            coalesce((select string_agg(e.name, ', ') from expected_tables e
                      where not exists (select 1 from pg_tables p
                                        where p.schemaname='public' and p.tablename=e.name)), '?')
@@ -52,7 +52,7 @@ checks as (
          coalesce(string_agg(tablename || ':' || cmd, ', '), 'no mutating policies'),
          case when count(*) = 0 then 'PASS' else 'FAIL — versions can be overwritten' end
   from pg_policies
-  where schemaname='public' and tablename in ('prompt_versions','knowledge_entry_versions')
+  where schemaname='public' and tablename in ('prompt_versions','knowledge_entry_versions','prompt_version_outcomes')
     and cmd in ('UPDATE','DELETE','ALL')
 
   union all
@@ -140,7 +140,7 @@ checks as (
   union all
   select 15, 'authenticated can reach the tables',
          count(distinct table_name)::text || ' tables granted',
-         case when count(distinct table_name) >= 24 then 'PASS' else 'FAIL' end
+         case when count(distinct table_name) >= 25 then 'PASS' else 'FAIL' end
   from information_schema.role_table_grants
   where grantee = 'authenticated' and table_schema = 'public'
 )
