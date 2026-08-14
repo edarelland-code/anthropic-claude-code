@@ -5,15 +5,16 @@
 > `docs/ARCHITECTURE.md`; setup and deployment live in `docs/DEPLOYMENT.md`.
 
 **Last updated:** 2026-08-14
-**Current phase:** Phase 5 — Claude Code integration. **Complete.** Implemented, hosted-validated,
-and usable end to end through a real HTTP endpoint.
+**Current phase:** Phase 6 — Assisted ingestion. **Core complete; AI provider pending
+configuration.** The whole source → suggestions → persistent review → correction → confirmation →
+authoritative records workflow is built, hosted-validated and usable. The Anthropic provider is
+written against the same interface, reports itself unconfigured, and makes no external call.
 
-Phases 1, 2, 3 and 4 are closed and merged.
+Phases 1–5 are closed and merged.
 
 Live at **<https://contextshelf.vercel.app>**, backed by Supabase `omhktzxwffaipmcoljic`, carrying
-migrations `0001`–`0006` — **27 tables**, 4 views, 36 policies. Phase 5 added one table
-(`ingestion_deliveries`, the Idempotency-Key ledger), scope and expiry columns on the
-`ingestion_tokens` table Phase 0 had already created, and one function.
+migrations `0001`–`0007` — **29 tables**, 4 views, 38 policies. Phase 6 added two tables
+(`extraction_runs`, `extraction_suggestions`) and one function.
 
 ---
 
@@ -31,6 +32,106 @@ These terms mean exactly this and nothing more:
 | **Production validated** | Verified on the deployed URL against the hosted Supabase project |
 | **Cross-device validated** | The same account was verified on two physical machines |
 
+
+---
+
+## Phase 6 — Assisted ingestion
+
+**Status: Core complete; AI provider pending configuration.** Those are two separable layers and
+the distinction is load-bearing — see "What is and is not operational" below.
+
+### The rule
+
+**A provider may suggest. A person confirms.** Every part of Phase 6 is arranged so that no output
+becomes project memory without somebody agreeing to it, and so that a reviewer always knows what
+produced a suggestion.
+
+```
+Raw source (unchanged, in the Inbox)
+  → deterministic preparation   size check · credential scan · chunking
+  → ExtractionProvider          deterministic today; Anthropic when configured
+  → strict validation           malformed records rejected BY NAME, valid ones kept
+  → merge across chunks         the same thing said twice is one suggestion
+  → duplicate/conflict          from the Phase 3 fingerprint, never from the provider
+  → extraction_suggestions      rows, so a review survives a closed tab
+  → user reviews, edits, rejects
+  → confirm_extraction_suggestions()   one transaction, idempotent
+  → authoritative records       decisions PROPOSED, ideas SUGGESTED, prompts UNTESTED
+```
+
+### What is and is not operational
+
+| Layer | Status |
+|---|---|
+| **Phase 6 Core** — the workflow above, with deterministic extraction | ✅ Complete, hosted-validated |
+| **Phase 6 AI Enhancement** — Anthropic-backed semantic extraction | ⏸ Code-ready, **not connected**. No key, no external call, and the UI says so |
+
+**Nothing in the product describes deterministic extraction as AI.** The button says *Extract
+suggestions*, the panel says *deterministic extraction — it does not understand the conversation*,
+and Settings lists "Deterministic extraction" and "AI-assisted extraction" as two separate rows
+with the second marked *Not configured*. This is not modesty. A reviewer who believes a model read
+their conversation reviews far less carefully than one who knows a matcher scanned it, and the
+review is the only thing between a suggestion and the project's memory.
+
+### What deterministic extraction can and cannot identify
+
+**Can**, because the author stated it: labelled records (`Decision:`, `Idea:`, `Bug:`, `Fix:`,
+`TODO:`, `Prompt:`, `Question:`) at confidence 1; phrase-matched types ("we decided", "blocked on",
+"next step") capped at 0.75; the record kind each belongs to, so a decision becomes a Decision and
+a TODO becomes an Action rather than all of them becoming generic entries; and a line anchor for
+every one.
+
+**Cannot**: read an unlabelled conversation. A discussion that reaches a decision without anyone
+writing "Decision:" yields nothing, and a recommendation phrased as one is correctly left as an
+idea. It proposes no Current State and no relationships at all — both require judgement about the
+project rather than about a sentence, and a keyword matcher proposing "here is your new Current
+State" would be the system pretending to understand.
+
+### Issues found and fixed
+
+| # | Severity | Issue | Fix |
+|---|---|---|---|
+| 54 | **High — an unauthenticated caller could reach the confirm function** | `revoke ... from anon` does not remove the implicit `PUBLIC` EXECUTE grant PostgreSQL puts on every new function, so `anon` inherited it. RLS would still have refused the writes, but a function that reaches a workspace's rows should not be callable at all | `revoke ... from public` first. Asserted in `09_extraction.test.sql` |
+| 55 | **Medium — a credential warning that named the wrong vendor** | `sk-ant-…` matches OpenAI's pattern too, and the scan stops at the first hit, so every Anthropic key was reported as an OpenAI key | Anthropic ordered first; OpenAI's pattern excludes `ant-` |
+| 56 | **Medium — the commonest secret shape went undetected** | `\bpassword\b` never matches inside `DATABASE_PASSWORD=…` because `_` is a word character | Word boundaries dropped, so prefixed and suffixed names match |
+| 57 | Medium | `prompts` has no `source_session_id` column, so confirming a prompt suggestion raised | Provenance in `metadata`, with the source anchor on the version |
+| 58 | Low | The validator's Phase 6 section renamed an identifier inside a result string | Renamed properly; the check now reads as written |
+
+### Not done in Phase 6
+
+* **The Anthropic provider is not connected.** See the setup below.
+* **Relationship suggestions are accepted and confirmable, but nothing proposes them.** The
+  deterministic provider does not, for the reason above. The path is built and tested; a model
+  provider is what would populate it.
+* **Duplicate linking is a warning, not an action.** Review shows "possible existing record" and
+  leaves the choice; there is no "link to existing" button yet, so the honest options today are
+  keep-as-new or deselect.
+* **Cost display shows tokens, not currency.** No pricing table is configured, and an estimate
+  nobody can reproduce is worse than no number.
+
+### The one-time setup that would enable AI-assisted extraction
+
+Set in Vercel **production**, server-side only:
+
+```
+ANTHROPIC_API_KEY=sk-ant-…                       required
+CONTEXTSHELF_EXTRACTION_MODEL=claude-sonnet-4-5  optional; this is the default
+```
+
+Nothing goes in the client bundle, in git, in `CLAUDE.md`, or in any log. There is deliberately no
+place in the app to paste a key: storing one per user would mean encrypting it at rest, which
+would mean a key-management dependency this deployment does not have.
+
+**Expected cost.** One call per chunk, only when someone presses Extract. A typical conversation is
+one chunk of roughly 10–20k input tokens returning ~2k — a fraction of a cent at Sonnet pricing. A
+long one splits into two or three. Nothing analyses automatically, and Claude Code deliveries never
+trigger a call.
+
+**What validation would remain after the key is supplied:** the Anthropic client itself (the
+`extract()` body, which today refuses by name), a live call proving structured output validates
+against the existing schema, the fixtures 6AI cases 1–7 re-run against the model rather than the
+matcher, token/cost recording from a real response, and the pre-send credential flow exercised with
+a provider that actually sends.
 
 ---
 
@@ -642,16 +743,16 @@ Phase 1's criteria all pass. These are honest gaps in *coverage*, not open crite
 
 | Suite | Result |
 |---|---|
-| `npm run build` | pass — 22 routes, including `/api/ingest` |
+| `npm run build` | pass — 22 routes |
 | `npm run typecheck` | pass |
 | `npm run lint` | pass, 0 warnings |
-| `npm run test` | **214 passed** / 15 files |
-| `npm run test:db` | **8 suites passed** against PostgreSQL 16.13, plus both hosted-script smoke tests |
-| `npm run schema:parity` | columns 338, enums 14, RLS 27, policies 36, indexes 106, constraints 159, triggers 19, functions 19 — all matching |
-| `hosted/01_verify_schema.sql` | **32/32 PASS** against `omhktzxwffaipmcoljic` |
-| `hosted/02_rls_isolation.sql` | **ALL HOSTED RLS CHECKS PASSED**, rolled back — now including ingestion credentials |
-| `npm run validate:hosted` | **107/107 checks pass** |
-| Authenticated responsive QA | **100 combinations, 0 skipped, no layout failures** |
+| `npm run test` | **265 passed** / 16 files |
+| `npm run test:db` | **9 suites passed** against PostgreSQL 16.13, plus both hosted-script smoke tests |
+| `npm run schema:parity` | columns 392, enums 17, RLS 29, policies 38, indexes 112, constraints 174, triggers 21, functions 20 — all matching |
+| `hosted/01_verify_schema.sql` | **34/34 PASS** against `omhktzxwffaipmcoljic` |
+| `hosted/02_rls_isolation.sql` | **ALL HOSTED RLS CHECKS PASSED**, rolled back |
+| `npm run validate:hosted` | **128/128 checks pass** |
+| Authenticated responsive QA | **105 combinations, 0 skipped, no layout failures** — now including the review workspace |
 | Cross-device acceptance test | **PASS** — Work PC ↔ Mac, both directions, by the account holder |
 
 Hosted data after validation: one workspace, one user, and the account holder's own
@@ -663,23 +764,21 @@ deleted by its own cleanup — `context_snapshots`, `knowledge_entries`, `source
 
 ## Next task
 
-**Phase 6 — Automation.** Browser companion architecture, Chat/Cowork ingestion,
-auto-classification, and surfacing the duplicate and conflict detection that already exists.
-Exit criteria in `docs/ARCHITECTURE.md` §13: duplicate detection proposes (never applies) merges
-and the user confirms.
+**Connect the Anthropic provider**, if and when the account holder decides to. Everything else in
+Phase 6 is finished; the exact one-time setup is in the Phase 6 section above, and the remaining
+validation is listed there too.
 
-Phase 5 left the receiving half already built. A browser companion is a new **adapter** posting the
-same canonical payload to the same endpoint with its own token — not a new write path (rule 20).
-R2 in §14 still holds: there is no supported export or API for Claude Chat and Cowork, and nothing
-in the UI may imply otherwise until there is.
-
-The items under "Not done in Phase 5" are the natural first candidates: the MCP pathway, rate
-limiting on `/api/ingest`, and relationship editing, which is still deferred from Phase 4.
+After that, the outstanding items across phases, none of which blocks daily use: the MCP pathway
+and rate limiting on `/api/ingest` (Phase 5), relationship editing (Phase 4), "link to existing"
+as an action rather than a warning, and a browser companion for Chat/Cowork — which is a new
+**adapter** posting the canonical payload to the existing endpoint, not a new write path (rule 20).
+R2 in ARCHITECTURE §14 still holds: there is no supported export or API for Claude Chat and Cowork,
+and nothing in the UI may imply otherwise until there is.
 
 ## Resume trigger
 
 **IF** returning to ContextShelf development
-**THEN** Phases 1–5 are complete, validated, and merged. The hosted project and the deployment
+**THEN** Phases 1–6 are complete, validated, and merged, except the Anthropic provider connection. The hosted project and the deployment
 both exist and are proven, including cross-device continuity on two physical machines. Capture,
 triage, search, files and recovery all work end to end, and a Topic or Subtopic now generates a
 continuation prompt that a fresh Claude session can start from — assembled deterministically from

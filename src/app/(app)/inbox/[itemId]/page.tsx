@@ -7,8 +7,11 @@ import { getData } from '@/lib/data';
 import { INGESTION_STATUS_LABELS } from '@/lib/domain/types';
 import { suggestKnowledgeType, suggestTopic } from '@/lib/ingestion/classify';
 import { extractCandidates, extractSegments } from '@/lib/ingestion/extract';
+import { assessSource, findSecrets, secretWarning } from '@/lib/extraction/prepare';
+import { defaultProvider, providerById } from '@/lib/extraction/providers';
 import { formatDate } from '@/lib/utils';
 
+import { AnalyzePanel } from './analyze-panel';
 import { TriageForm, type TriageSegment } from './triage-form';
 
 export const dynamic = 'force-dynamic';
@@ -31,6 +34,18 @@ export default async function TriagePage({ params }: { params: Promise<{ itemId:
 
   const item = await data.inbox.getById(itemId);
   if (!item) notFound();
+
+  // The saved review, if there is one. Reading it here is what makes a review
+  // survive a closed tab (6AB) — the workspace below is rendered from rows,
+  // not from anything held in the browser.
+  const runs = await data.extraction.listRunsForRecord(item.id);
+  const latestRun = runs[0] ?? null;
+  const runSuggestions = latestRun ? await data.extraction.listSuggestions(latestRun.id) : [];
+
+  const provider = defaultProvider();
+  const modelProvider = providerById('anthropic');
+  const assessment = assessSource(item.rawContent ?? '');
+  const secretsMessage = secretWarning(findSecrets(item.rawContent ?? ''));
 
   const workspace = await data.workspaces.getDefault();
   const topics = workspace ? (await data.topics.list(workspace.id)).map((t) => t.topic) : [];
@@ -129,13 +144,18 @@ export default async function TriagePage({ params }: { params: Promise<{ itemId:
           <ul className="mt-2 space-y-1.5">
             {duplicates.map((d) => (
               <li key={d.candidateId} className="text-sm leading-6 break-words">
+                {/*
+                  A block target rather than a word inside a sentence. It reads
+                  as prose but it is the only way to reach the existing record,
+                  so on a phone it has to be reachable with a thumb.
+                */}
                 <Link
                   href={`/sources/${d.candidateId}`}
-                  className="font-medium text-indigo-600 hover:underline dark:text-indigo-400"
+                  className="inline-flex min-h-11 items-center font-medium text-indigo-600 hover:underline dark:text-indigo-400"
                 >
                   {d.candidateTitle}
                 </Link>
-                <span className="muted"> — {d.reason}</span>
+                <span className="block text-xs leading-5 muted">{d.reason}</span>
               </li>
             ))}
           </ul>
@@ -152,6 +172,36 @@ export default async function TriagePage({ params }: { params: Promise<{ itemId:
           back to.
         </p>
       </section>
+
+      {/*
+        Analysis sits ABOVE manual triage, and manual triage stays exactly where
+        it was. If no provider is ever configured — or if a run fails — the
+        Phase 3 path below is untouched and complete (6C).
+      */}
+      <AnalyzePanel
+        itemId={item.id}
+        topicId={item.topicId ?? topicSuggestion?.value.id ?? null}
+        subtopicId={item.subtopicId}
+        topics={topics.map((t) => ({ id: t.id, name: t.name }))}
+        providerLabel={provider.label}
+        providerIsModel={provider.id !== 'deterministic'}
+        providerProblem={modelProvider?.configurationProblem() ?? null}
+        sizeMessage={assessment.message}
+        secretWarning={secretsMessage}
+        tooLarge={assessment.tooLarge}
+        existingRun={
+          latestRun
+            ? {
+                id: latestRun.id,
+                suggestions: runSuggestions,
+                warnings: latestRun.warnings,
+                chunkCount: latestRun.chunkCount,
+                status: latestRun.status,
+                failureDetail: latestRun.failureDetail,
+              }
+            : null
+        }
+      />
 
       <div className="mt-6">
         <TriageForm

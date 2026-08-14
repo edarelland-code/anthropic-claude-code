@@ -48,8 +48,12 @@ import {
   type FileRepository,
   type IdeaRepository,
   type InboxRepository,
+  type ConfirmationReceipt,
+  type ExtractionRepository,
+  type ExtractionRun,
   type IngestDelivery,
   type IngestGateway,
+  type StoredSuggestion,
   type KnowledgeRepository,
   type PromptRepository,
   type ProposalRepository,
@@ -2528,6 +2532,203 @@ class SupabaseIngestGateway implements IngestGateway {
   }
 }
 
+/**
+ * The saved review (Phase 6AB).
+ *
+ * Every read and write goes through the caller's own session, so RLS decides
+ * which runs and suggestions exist. Nothing here can make a record
+ * authoritative: the only method that creates anything is `confirm`, and that
+ * calls the database function whose whole design is the confirm gate.
+ */
+class SupabaseExtraction implements ExtractionRepository {
+  constructor(private readonly db: SupabaseClient) {}
+
+  async listRunsForRecord(ingestionRecordId: string): Promise<ExtractionRun[]> {
+    const { data, error } = await this.db
+      .from('extraction_runs')
+      .select('*')
+      .eq('ingestion_record_id', ingestionRecordId)
+      .order('started_at', { ascending: false });
+    if (error) throw new Error(`list extraction runs: ${error.message}`);
+    return ((data ?? []) as Row[]).map(map.toExtractionRun);
+  }
+
+  async listRunsForWorkspace(workspaceId: string, limit = 25): Promise<ExtractionRun[]> {
+    const { data, error } = await this.db
+      .from('extraction_runs')
+      .select('*')
+      .eq('workspace_id', workspaceId)
+      .order('started_at', { ascending: false })
+      .limit(limit);
+    if (error) throw new Error(`list extraction runs: ${error.message}`);
+    return ((data ?? []) as Row[]).map(map.toExtractionRun);
+  }
+
+  async getRun(runId: string): Promise<ExtractionRun | null> {
+    const { data, error } = await this.db
+      .from('extraction_runs').select('*').eq('id', runId).maybeSingle();
+    if (error) throw new Error(`get extraction run: ${error.message}`);
+    return data ? map.toExtractionRun(data as unknown as Row) : null;
+  }
+
+  async listSuggestions(runId: string): Promise<StoredSuggestion[]> {
+    const { data, error } = await this.db
+      .from('extraction_suggestions')
+      .select('*')
+      .eq('run_id', runId)
+      .order('ordinal', { ascending: true });
+    if (error) throw new Error(`list suggestions: ${error.message}`);
+    return ((data ?? []) as Row[]).map(map.toStoredSuggestion);
+  }
+
+  async saveRun(input: Parameters<ExtractionRepository['saveRun']>[0]): Promise<ExtractionRun> {
+    const { data: userRes } = await this.db.auth.getUser();
+    const userId = userRes.user?.id;
+    if (!userId) throw new Error('save extraction run: not signed in');
+
+    const run = unwrap(
+      await this.db
+        .from('extraction_runs')
+        .insert({
+          workspace_id: input.workspaceId,
+          user_id: userId,
+          ingestion_record_id: input.ingestionRecordId,
+          source_session_id: input.sourceSessionId,
+          topic_id: input.topicId,
+          subtopic_id: input.subtopicId,
+          provider: input.provider,
+          model: input.model,
+          prompt_version: input.promptVersion,
+          status: input.status,
+          failure_code: input.failureCode,
+          failure_detail: input.failureDetail,
+          chunk_count: input.chunkCount,
+          suggested_count: input.suggestions.length,
+          input_tokens: input.inputTokens,
+          output_tokens: input.outputTokens,
+          warnings: input.warnings,
+          finished_at: new Date().toISOString(),
+        })
+        .select('*')
+        .single(),
+      'save extraction run',
+    );
+
+    if (input.suggestions.length > 0) {
+      const { error } = await this.db.from('extraction_suggestions').insert(
+        input.suggestions.map((s, i) => ({
+          workspace_id: input.workspaceId,
+          run_id: String(run.id),
+          ordinal: i,
+          kind: s.kind,
+          knowledge_type: s.knowledgeType,
+          title: s.title,
+          content: s.content,
+          reason: s.reason,
+          status_suggestion: s.statusSuggestion,
+          suggested_topic_id: s.suggestedTopicId,
+          suggested_subtopic_id: s.suggestedSubtopicId,
+          source_reference: s.sourceReference,
+          chunk_index: s.chunkIndex,
+          confidence: s.confidence,
+          basis: s.basis,
+          payload: s.payload,
+          original: s.original,
+          selected: s.selected,
+          duplicate_of_kind: s.duplicateOfKind,
+          duplicate_of_id: s.duplicateOfId,
+          duplicate_reason: s.duplicateReason,
+          conflicts_with_id: s.conflictsWithId,
+          conflict_reason: s.conflictReason,
+        })),
+      );
+      if (error) throw new Error(`save suggestions: ${error.message}`);
+    }
+
+    return map.toExtractionRun(run);
+  }
+
+  async updateSuggestion(
+    input: Parameters<ExtractionRepository['updateSuggestion']>[0],
+  ): Promise<StoredSuggestion> {
+    const patch: Row = {};
+    if (input.title !== undefined) patch.title = input.title;
+    if (input.content !== undefined) patch.content = input.content;
+    if (input.reason !== undefined) patch.reason = input.reason;
+    if (input.kind !== undefined) patch.kind = input.kind;
+    if (input.knowledgeType !== undefined) patch.knowledge_type = input.knowledgeType;
+    if (input.statusSuggestion !== undefined) patch.status_suggestion = input.statusSuggestion;
+    if (input.suggestedTopicId !== undefined) patch.suggested_topic_id = input.suggestedTopicId;
+    if (input.suggestedSubtopicId !== undefined) patch.suggested_subtopic_id = input.suggestedSubtopicId;
+    if (input.selected !== undefined) patch.selected = input.selected;
+
+    // Any change to the substance marks it `edited`. Toggling selection does
+    // not — ticking a box is not correcting a suggestion, and conflating them
+    // would lose the distinction 6AA exists to keep.
+    const substantive =
+      input.title !== undefined || input.content !== undefined || input.reason !== undefined ||
+      input.kind !== undefined || input.knowledgeType !== undefined ||
+      input.statusSuggestion !== undefined;
+    if (input.state !== undefined) patch.state = input.state;
+    else if (substantive) patch.state = 'edited';
+
+    const res = await this.db
+      .from('extraction_suggestions')
+      .update(patch)
+      .eq('id', input.id)
+      // A confirmed suggestion is finished. Editing one would imply the record
+      // it created had changed, which it has not.
+      .neq('state', 'confirmed')
+      .select('*')
+      .single();
+    return map.toStoredSuggestion(unwrap(res, 'update suggestion'));
+  }
+
+  async setSelection(runId: string, ids: string[], selected: boolean): Promise<void> {
+    if (ids.length === 0) return;
+    const { error } = await this.db
+      .from('extraction_suggestions')
+      .update({ selected })
+      .eq('run_id', runId)
+      .in('id', ids)
+      .neq('state', 'confirmed');
+    if (error) throw new Error(`select suggestions: ${error.message}`);
+  }
+
+  async reject(ids: string[]): Promise<void> {
+    if (ids.length === 0) return;
+    const { error } = await this.db
+      .from('extraction_suggestions')
+      .update({ state: 'rejected', selected: false })
+      .in('id', ids)
+      .neq('state', 'confirmed');
+    if (error) throw new Error(`reject suggestions: ${error.message}`);
+  }
+
+  async confirm(input: {
+    runId: string;
+    suggestionIds: string[];
+    topicId: string;
+    subtopicId: string | null;
+  }): Promise<ConfirmationReceipt> {
+    const { data, error } = await this.db.rpc('confirm_extraction_suggestions', {
+      p_run_id: input.runId,
+      p_suggestion_ids: input.suggestionIds,
+      p_topic_id: input.topicId,
+      p_subtopic_id: input.subtopicId,
+    });
+    if (error) throw new Error(error.message);
+    const r = (data ?? {}) as Row;
+    return {
+      runId: typeof r.runId === 'string' ? r.runId : input.runId,
+      created: Array.isArray(r.created) ? (r.created as ConfirmationReceipt['created']) : [],
+      createdCount: typeof r.createdCount === 'number' ? r.createdCount : 0,
+      skippedCount: typeof r.skippedCount === 'number' ? r.skippedCount : 0,
+      ingestionRecordId: typeof r.ingestionRecordId === 'string' ? r.ingestionRecordId : null,
+    };
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 export function createIngestGateway(db: SupabaseClient): IngestGateway {
@@ -2555,6 +2756,7 @@ export function createDataContext(db: SupabaseClient): DataContext {
     recycle: new SupabaseRecycle(db),
     resumeHistory: new SupabaseResumeHistory(db),
     tokens: new SupabaseTokens(db),
+    extraction: new SupabaseExtraction(db),
   };
 }
 

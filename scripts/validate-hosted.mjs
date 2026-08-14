@@ -124,6 +124,9 @@ const browser = await chromium.launch(launchOptions());
 let exitCode = 0;
 /** Filled once the run has created a subtopic, for the responsive audit's URLs. */
 let qaSubtopicId = null;
+/** Filled by the extraction section, for the cross-user checks and the audit. */
+let qaExtractionRunId = null;
+let qaInboxItemId = null;
 
 try {
   // --- B. Authentication ----------------------------------------------------
@@ -1049,6 +1052,160 @@ try {
   );
   record('a replacement token works', afterRotate.status === 201, `status ${afterRotate.status}`);
 
+  // --- T. Extraction and review ---------------------------------------------
+  //
+  // The Phase 6 workflow end to end, through the deployed UI: capture, extract,
+  // review, edit, confirm — then assert the ROWS, not the screen (AD-16).
+  heading('T. Extraction and review');
+
+  const EXTRACT_MARK = `quokka${stamp}`;
+  const extractSource = [
+    'User: two things today.',
+    '',
+    'Decision: Timeline merge lives in a database view',
+    'Application-level merging drifts and nobody would maintain the cache.',
+    '',
+    `Idea: we could add a browser companion for ${EXTRACT_MARK}`,
+    'Nothing about it is decided yet.',
+    '',
+    'Bug: the resume preview showed stale text after switching destination',
+    'Fix: wait for the preview to change rather than for a word it already had',
+    '',
+    'TODO: run the responsive audit on the topic page',
+  ].join('\n');
+
+  await a.goto(`${BASE}/inbox`, { waitUntil: 'networkidle' });
+  await a.fill('textarea', extractSource).catch(() => {});
+  await a.click('button:has-text("Save to Inbox")').catch(() => {});
+  await a.waitForTimeout(1500);
+
+  const { data: qaCaptured } = await admin
+    .from('ingestion_records')
+    .select('id,raw_content,status')
+    .like('raw_content', `%${EXTRACT_MARK}%`)
+    .limit(1);
+  const captureId = (qaCaptured ?? [])[0]?.id ?? null;
+  record('a source is captured before anything analyses it',
+    Boolean(captureId), captureId ? `record ${String(captureId).slice(0, 8)}…` : 'no capture');
+
+  if (captureId) {
+    await a.goto(`${BASE}/inbox/${captureId}`, { waitUntil: 'networkidle' });
+    const panelText = await a.innerText('body').catch(() => '');
+
+    // The naming rule. With no model configured nothing may claim AI did this.
+    record('deterministic extraction is not described as AI',
+      /deterministic extraction/i.test(panelText) &&
+        !/\bClaude (read|analysed|analyzed|extracted)/i.test(panelText),
+      'labelled honestly');
+    record('the unconfigured model provider is stated plainly',
+      /AI-assisted extraction is not configured/i.test(panelText), 'said, not hidden');
+    record('the manual path is still offered',
+      /Save to this topic|File it|Extract|topic/i.test(panelText), 'triage form present');
+
+    await a.click('button:has-text("Extract suggestions")').catch(() => {});
+    await a.waitForFunction(() => /suggestions? to review/i.test(document.body.innerText), null, { timeout: 40_000 }).catch(() => {});
+
+    const { data: xRunRows } = await admin
+      .from('extraction_runs')
+      .select('id,provider,model,prompt_version,status,suggested_count,chunk_count')
+      .eq('ingestion_record_id', captureId)
+      .order('started_at', { ascending: false });
+    const xRun = (xRunRows ?? [])[0] ?? null;
+
+    record('an extraction run is recorded with its provider and prompt version',
+      Boolean(xRun) && xRun.provider === 'deterministic' && xRun.prompt_version === '1',
+      xRun ? `${xRun.provider} · prompt v${xRun.prompt_version} · ${xRun.status}` : 'no run');
+    record('no model was called', Boolean(xRun) && xRun.model === null, 'model null');
+
+    const { data: sugg } = await admin
+      .from('extraction_suggestions')
+      .select('*')
+      .eq('run_id', xRun?.id ?? '00000000-0000-0000-0000-000000000000')
+      .order('ordinal');
+    const suggestions = sugg ?? [];
+
+    record('suggestions are stored, not held in the browser',
+      suggestions.length >= 3, `${suggestions.length} rows`);
+    record('every suggestion carries a source anchor',
+      suggestions.length > 0 && suggestions.every((s) => /^L\d+(-L\d+)?$/.test(s.source_reference ?? '')),
+      'provenance on all');
+    record('a decision was proposed and an idea was separated from it',
+      suggestions.some((s) => s.kind === 'decision') && suggestions.some((s) => s.kind === 'idea'),
+      [...new Set(suggestions.map((s) => s.kind))].join(', '));
+
+    // Nothing authority-changing may start ticked.
+    const preselectedAuthority = suggestions.filter(
+      (s) => s.selected && ['decision', 'current_state'].includes(s.kind),
+    );
+    record('no authority-changing suggestion is pre-selected',
+      preselectedAuthority.length === 0, `${preselectedAuthority.length} pre-ticked`);
+
+    // The review survives a reload — the point of persisting it.
+    await a.reload({ waitUntil: 'networkidle' });
+    const afterReload = await a.innerText('body').catch(() => '');
+    record('the review survives a refresh',
+      /suggestions? to review/i.test(afterReload), 'restored from rows');
+
+    // Edit one suggestion, then confirm. The edit is what must be filed.
+    const target = suggestions.find((s) => s.kind === 'decision') ?? suggestions[0];
+    const editedTitle = `Edited by review ${stamp}`;
+    if (target) {
+      await admin.from('extraction_suggestions')
+        .update({ title: editedTitle, state: 'edited', selected: true })
+        .eq('id', target.id);
+    }
+    const confirmIds = suggestions
+      .filter((s) => s.kind !== 'current_state')
+      .map((s) => s.id);
+    await admin.from('extraction_suggestions')
+      .update({ selected: true }).in('id', confirmIds);
+
+    const { data: receipt, error: confirmErr } = await userA.rpc('confirm_extraction_suggestions', {
+      p_run_id: xRun?.id,
+      p_suggestion_ids: confirmIds,
+      p_topic_id: topicId,
+      p_subtopic_id: null,
+    });
+    record('a batch confirmation returns an exact receipt',
+      !confirmErr && (receipt?.createdCount ?? 0) > 0,
+      confirmErr ? confirmErr.message : `${receipt?.createdCount} created, ${receipt?.skippedCount} skipped`);
+
+    const { data: filedDecisions } = await admin
+      .from('decisions').select('id,title,status').eq('topic_id', topicId);
+    const fromReview = (filedDecisions ?? []).find((d) => d.title === editedTitle);
+    record('the user’s edit is what got filed, not the original',
+      Boolean(fromReview), fromReview ? 'edited title stored' : 'edit lost');
+    record('a confirmed decision is proposed, never active',
+      fromReview?.status === 'proposed', `status ${fromReview?.status}`);
+
+    const { data: filedEntries } = await admin
+      .from('knowledge_entries').select('id,knowledge_type,source_session_id').eq('topic_id', topicId);
+    record('confirmed entries carry Layer 1 evidence',
+      (filedEntries ?? []).some((e) => e.source_session_id !== null), 'linked to a session');
+
+    // Idempotent: confirming again writes nothing.
+    const beforeCount = (filedDecisions ?? []).length;
+    await userA.rpc('confirm_extraction_suggestions', {
+      p_run_id: xRun?.id, p_suggestion_ids: confirmIds, p_topic_id: topicId, p_subtopic_id: null,
+    });
+    const { data: afterDecisions } = await admin
+      .from('decisions').select('id').eq('topic_id', topicId);
+    record('confirming twice writes nothing the second time',
+      (afterDecisions ?? []).length === beforeCount,
+      `${(afterDecisions ?? []).length} decisions, unchanged`);
+
+    const { data: sourceAfter } = await admin
+      .from('ingestion_records').select('status,raw_content').eq('id', captureId).single();
+    record('the raw source is never altered by extraction',
+      String(sourceAfter?.raw_content).includes(EXTRACT_MARK), 'stored verbatim');
+    record('a partly reviewed item is marked partially processed',
+      ['partially_processed', 'processed'].includes(sourceAfter?.status),
+      `status ${sourceAfter?.status}`);
+
+    qaExtractionRunId = xRun?.id ?? null;
+    qaInboxItemId = captureId;
+  }
+
   // --- C. Persists across a hard reload -------------------------------------
   heading('C. Persistence across a hard reload');
   await a.reload({ waitUntil: 'networkidle' });
@@ -1095,8 +1252,8 @@ try {
   // `authenticated` role: search_documents unions twelve tables, so one missing
   // security_invoker would hand a stranger another account's transcripts,
   // prompt bodies and decisions in a single query.
+  const userB = await userClient(USER_B);
   if (dbTopic) {
-    const userB = await userClient(USER_B);
     const { data: leak } = await userB.rpc('search_records', {
       p_workspace_id: dbTopic.workspace_id, p_query: CAPTURE_MARK,
     });
@@ -1127,7 +1284,19 @@ try {
     // And the Resume page itself is not reachable.
     await b.goto(`${BASE}/topics/${dbTopic.id}/resume`, { waitUntil: 'networkidle' });
     const bResume = await b.content();
-    record('the resume page is denied to the second account',
+    const { data: bRuns } = await userB.from('extraction_runs').select('id');
+  record('extraction runs do not leak to the second account',
+    (bRuns ?? []).length === 0, `${(bRuns ?? []).length} row(s)`);
+  const { data: bSugg } = await userB.from('extraction_suggestions').select('id,title');
+  record('suggestions do not leak to the second account',
+    (bSugg ?? []).length === 0, 'nothing returned');
+  const { error: bConfirm } = await userB.rpc('confirm_extraction_suggestions', {
+    p_run_id: qaExtractionRunId, p_suggestion_ids: [], p_topic_id: topicId, p_subtopic_id: null,
+  });
+  record('the second account cannot confirm the first account’s suggestions',
+    Boolean(bConfirm), bConfirm ? bConfirm.message : 'NOT refused');
+
+  record('the resume page is denied to the second account',
       !bResume.includes('ContextShelf Resume Context'),
       bResume.includes('ContextShelf Resume Context') ? 'LEAKED' : 'not generated');
   }
@@ -1166,6 +1335,9 @@ try {
             [
               topicId ? { path: `/topics/${topicId}`, name: 'topic' } : null,
               topicId ? { path: `/topics/${topicId}/resume`, name: 'resume' } : null,
+              qaInboxItemId
+                ? { path: `/inbox/${qaInboxItemId}`, name: 'extraction-review' }
+                : null,
               topicId && qaSubtopicId
                 ? { path: `/topics/${topicId}/resume?subtopic=${qaSubtopicId}`, name: 'resume-subtopic' }
                 : null,
