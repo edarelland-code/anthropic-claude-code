@@ -450,9 +450,16 @@ the confidence threshold without a review step in v1** — misfiling silently is
 inbox item. Phases: Phase 3 = deterministic (keyword/slug/recency); Phase 6 = model-assisted, with
 the same confirm gate.
 
-**Stage 5 — Dedupe/conflict** (Phase 6) runs *before* commit and can only *propose*: similar
-topic, duplicate entry, duplicate prompt body, conflicting decision, newer-decision-supersedes.
-Per the working rules, it never merges silently.
+**Stage 5 — Dedupe/conflict** runs *before* commit and can only *propose*: similar topic,
+duplicate entry, duplicate prompt body, conflicting decision, newer-decision-supersedes. Per the
+working rules, it never merges silently.
+
+Phase 3 built the deterministic half: a generated `content_fingerprint` for exact matches, trigram
+similarity for near ones, `external_url` and `commit_sha` for a re-imported source, and title
+similarity for two active decisions that may contradict each other. `ProposalRepository` has no
+method that can merge, link or supersede — acting on a proposal is a separate call the user
+triggers, so a silent auto-merge is not expressible. Phase 6 may improve the matching; it does not
+get to remove the confirmation.
 
 **Transport surfaces:**
 - `POST /api/ingest` — JSON, bearer token from `ingestion_tokens`, scoped to a workspace. The
@@ -586,7 +593,7 @@ files exist.
 | **0 · Architecture** | This document, CLAUDE.md, dev-state file, repo skeleton, schema DDL | ✅ Committed |
 | **1 · Foundation** | Next.js app, Supabase project, auth, migrations applied, RLS verified, Topics + Subtopics + Knowledge Entries CRUD, Home, Topic page, responsive shell | Sign in on two devices, create a topic on one, see it on the other. RLS denies cross-user reads (tested). |
 | **2 · Memory** | Timeline, Decisions, Ideas, Prompts + versions, supersession UI, Current State, Master Topic Memory, Relationships | Supersede a decision; Current shows new, Timeline shows both, reason recorded. Prompt v2 never destroys v1. |
-| **3 · Capture & retrieval** | Inbox, Quick Capture, full-text search + filters, file/URL references, JSON + transcript import | Paste a transcript → N entries with provenance. Search finds content inside transcripts. |
+| **3 · Capture & retrieval** | Inbox, Quick Capture, full-text search + filters, file/URL references, JSON + transcript import | ✅ **Both criteria met, on the hosted deployment.** A pasted transcript produced 2 entries, each anchored back into the stored original; searching a word that appears only inside a transcript body returns it. Quick Capture requires content and nothing else |
 | **4 · Continuation** | Resume in Claude, 3 densities, 3 targets, Resume Triggers, snapshots | Generated prompt starts a fresh session with no manual context, and contains the avoid-list. |
 | **5 · Claude Code integration** | `/api/ingest`, tokens, git metadata model, hook scripts, MCP pathway | A real `git commit` in a real repo produces a real ContextShelf entry with no manual step. |
 | **6 · Automation** | Browser companion architecture, Chat/Cowork ingestion, auto-classification, duplicate & conflict detection, suggested summaries | Duplicate detection proposes (never applies) merges; user confirms. |

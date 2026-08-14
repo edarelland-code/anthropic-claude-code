@@ -14,6 +14,8 @@
 import { chromium } from 'playwright';
 import { mkdir } from 'node:fs/promises';
 
+import { launchOptions } from './chromium-path.mjs';
+
 const BASE = process.argv[2]?.startsWith('http') ? process.argv[2] : 'http://127.0.0.1:3000';
 const SHOTS = process.argv.includes('--screenshots');
 const SHOT_DIR = process.env.QA_SHOT_DIR ?? '/tmp/contextshelf-qa';
@@ -41,6 +43,11 @@ const PAGES = [
   { path: '/decisions', name: 'decisions', auth: true },
   { path: '/ideas', name: 'ideas', auth: true },
   { path: '/prompts', name: 'prompts', auth: true },
+  // Phase 3 capture and retrieval surfaces.
+  { path: '/search', name: 'search', auth: true },
+  { path: '/search?q=icon', name: 'search-results', auth: true },
+  { path: '/search?q=icon&type=decisions&state=current', name: 'search-filtered', auth: true },
+  { path: '/files', name: 'files', auth: true },
 ];
 
 const MIN_TOUCH = 40; // px; below this a control is awkward on a phone
@@ -75,17 +82,48 @@ async function auditPage(page, vp, spec) {
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
   );
   if (overflow > 1) {
+    // Report the elements that stick out of THEIR OWN PARENT, which is the
+    // only precise definition of where the layout breaks.
+    //
+    // Two earlier versions of this got it wrong in opposite directions.
+    // Listing the first elements past the viewport in document order named the
+    // outermost containers, so every overflow read as "the card is too wide".
+    // Listing the narrowest named leaves — a 19px "0%", a 2px SVG circle —
+    // that were merely carried past the edge by an ancestor. Neither points at
+    // the element to fix.
+    //
+    // An element wider than its parent's content box is the break point, and
+    // min-content says why: when it equals the width, the element refused to
+    // shrink, which is a flex or grid item without min-w-0 almost every time.
     const culprits = await page.evaluate((limit) => {
       const out = [];
       for (const el of document.querySelectorAll('body *')) {
         const r = el.getBoundingClientRect();
-        if (r.width > 0 && r.right > limit + 1) {
-          out.push(`${el.tagName.toLowerCase()}.${(el.className || '').toString().slice(0, 60)}`);
-        }
+        if (r.width === 0 || r.right <= limit + 1) continue;
+        const parent = el.parentElement;
+        if (!parent) continue;
+        const pr = parent.getBoundingClientRect();
+        const ps = getComputedStyle(parent);
+        const inner = pr.right - parseFloat(ps.paddingRight || '0') - parseFloat(ps.borderRightWidth || '0');
+        if (r.right <= inner + 1) continue; // carried along, not the break
+
+        const probe = el.style.width;
+        el.style.width = 'min-content';
+        const min = Math.round(el.getBoundingClientRect().width);
+        el.style.width = probe;
+
+        const cls = (el.className || '').toString().slice(0, 44);
+        const text = (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 26);
+        out.push(
+          `${el.tagName.toLowerCase()}.${cls} w=${Math.round(r.width)} min=${min} ` +
+          `parent=${parent.tagName.toLowerCase()}.${(parent.className || '').toString().slice(0, 28)} ` +
+          `(${Math.round(inner - pr.left)}) "${text}"`,
+        );
         if (out.length >= 3) break;
       }
-      return out;
+      return out.length ? out : ['no element exceeds its parent — the page itself is wider than the viewport'];
     }, vp.width);
+
     fail(`${spec.name} @ ${vp.name}: ${overflow}px horizontal overflow — ${culprits.join(' | ')}`);
   }
 
@@ -104,12 +142,31 @@ async function auditPage(page, vp, spec) {
   }
 
   // 3. Touch targets on phone widths.
+  //
+  // What is measured is the area a thumb can actually hit, which is not always
+  // the control's own box. A visually-hidden radio inside a label — the pattern
+  // behind the search filter chips — is a 1px input wrapped in a 44px target,
+  // and flagging the input would be measuring the wrong rectangle.
+  //
+  // The substitution is deliberately narrow: the label has to genuinely contain
+  // or point at the control, and the LABEL's box then has to pass on its own.
+  // A hidden control with no label, or with a label that is also too small,
+  // still fails — so this cannot be used to hide a real defect.
   if (vp.width <= 430) {
     const small = await page.evaluate((min) => {
       const out = [];
+      const hitBox = (el) => {
+        const own = el.getBoundingClientRect();
+        if (own.height >= min) return own;
+        const label =
+          el.closest('label') ??
+          (el.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`) : null);
+        return label ? label.getBoundingClientRect() : own;
+      };
       for (const el of document.querySelectorAll('button, a[href], select, input:not([type=hidden])')) {
-        const r = el.getBoundingClientRect();
-        if (r.width === 0 || r.height === 0) continue;
+        const own = el.getBoundingClientRect();
+        if (own.width === 0 || own.height === 0) continue;
+        const r = hitBox(el);
         if (r.height < min) {
           out.push(`${el.tagName.toLowerCase()}"${(el.textContent || '').trim().slice(0, 24)}" ${Math.round(r.height)}px`);
         }
@@ -140,36 +197,17 @@ async function auditPage(page, vp, spec) {
   }
 }
 
-/**
- * Prefer an explicit binary (CHROMIUM_PATH), then any Chromium already present
- * under PLAYWRIGHT_BROWSERS_PATH, then Playwright's own download. The
- * pre-installed build often differs from the one the npm package expects, so
- * launching by path avoids a pointless re-download.
+/*
+ * One launcher, shared with validate-hosted.mjs.
+ *
+ * This file used to carry its own copy, which resolved a Chromium binary but
+ * knew nothing about the proxy. That made it work on a machine with direct
+ * internet and fail with ERR_CONNECTION_RESET behind one — while the harness
+ * that spawns it succeeded on the same URLs, because only that half had been
+ * taught about the proxy. Two copies of "how do we start a browser" is one
+ * copy too many.
  */
-async function launchChromium() {
-  const roots = [process.env.CHROMIUM_PATH].filter(Boolean);
-  const browsersDir = process.env.PLAYWRIGHT_BROWSERS_PATH ?? '/opt/pw-browsers';
-  try {
-    const { readdirSync, existsSync } = await import('node:fs');
-    for (const dir of readdirSync(browsersDir).filter((d) => d.startsWith('chromium-'))) {
-      const candidate = `${browsersDir}/${dir}/chrome-linux/chrome`;
-      if (existsSync(candidate)) roots.push(candidate);
-    }
-  } catch {
-    // No pre-installed browsers; fall through to Playwright's own.
-  }
-
-  for (const executablePath of roots) {
-    try {
-      return await chromium.launch({ executablePath });
-    } catch {
-      // Try the next candidate.
-    }
-  }
-  return chromium.launch();
-}
-
-const browser = await launchChromium();
+const browser = await chromium.launch(launchOptions());
 
 if (SHOTS) await mkdir(SHOT_DIR, { recursive: true });
 

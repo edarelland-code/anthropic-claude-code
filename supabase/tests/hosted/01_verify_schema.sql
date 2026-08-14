@@ -143,5 +143,133 @@ checks as (
          case when count(distinct table_name) >= 26 then 'PASS' else 'FAIL' end
   from information_schema.role_table_grants
   where grantee = 'authenticated' and table_schema = 'public'
+
+  -- Phase 3 ------------------------------------------------------------------
+  -- Note what is NOT here: a new table. Phase 3 added none. The Inbox, Layer 1
+  -- evidence, file references, tags and the deletion log were all modelled in
+  -- Phase 0; the count above is still 26.
+
+  union all
+  -- AD-17. A view runs as its OWNER by default and reads past RLS on every
+  -- table beneath it. Every derived read model must opt out of that.
+  select 16, 'derived views are security_invoker',
+         count(*) filter (where array_to_string(c.reloptions, ',') like '%security_invoker=true%')::text
+           || ' / ' || count(*)::text,
+         case when count(*) = 4
+               and count(*) = count(*) filter (
+                     where array_to_string(c.reloptions, ',') like '%security_invoker=true%')
+              then 'PASS'
+              else 'FAIL — a view is reading past row-level security: ' ||
+                   coalesce(string_agg(c.relname, ', ') filter (
+                     where array_to_string(c.reloptions, ',') not like '%security_invoker=true%'),
+                     'expected 4 views')
+         end
+  from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relkind = 'v'
+    and c.relname in ('timeline_events','prompt_version_current_outcome',
+                      'prompt_current_winning','search_documents')
+
+  union all
+  select 17, 'Phase 3 functions',
+         count(*)::text || ' / 6',
+         case when count(*) = 6 then 'PASS' else 'FAIL' end
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname='public' and p.proname in (
+    'content_fingerprint','persist_ingestion','soft_delete_record','restore_record',
+    'search_records','search_type_counts')
+
+  union all
+  -- Writing through a definer function would let a caller name any workspace
+  -- and have RLS check the function owner's membership instead of theirs.
+  select 18, 'capture functions are security invoker',
+         coalesce(string_agg(p.proname || ':' ||
+           case when p.prosecdef then 'definer' else 'invoker' end, ', '), '(none found)'),
+         case when count(*) = 5 and count(*) filter (where p.prosecdef) = 0 then 'PASS'
+              else 'FAIL — a write or search path bypasses the caller''s row-level security' end
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname='public' and p.proname in ('persist_ingestion','soft_delete_record','restore_record',
+                                             'search_records','search_type_counts')
+
+  union all
+  -- The allowlist is the security boundary. If these functions ever start
+  -- building a table name, a client-supplied entity_type chooses what gets
+  -- written to.
+  select 19, 'soft delete uses no dynamic SQL',
+         count(*)::text || ' function(s) containing EXECUTE',
+         case when count(*) = 0 then 'PASS'
+              else 'FAIL — a mutating function interpolates a table name' end
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname='public' and p.proname in ('soft_delete_record','restore_record')
+    and upper(pg_get_functiondef(p.oid)) like '%EXECUTE FORMAT%'
+
+  union all
+  select 20, 'soft delete refuses append-only history',
+         case when pg_get_functiondef(p.oid) like '%append-only history and cannot be deleted%'
+              then 'prompt_version refused' else 'refusal MISSING' end,
+         case when pg_get_functiondef(p.oid) like '%append-only history and cannot be deleted%'
+               and pg_get_functiondef(p.oid) like '%immutable Layer 1 evidence%'
+              then 'PASS' else 'FAIL — rule 6 or rule 10 is unenforced' end
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname='public' and p.proname='soft_delete_record'
+
+  union all
+  select 21, 'search vectors across record types',
+         count(*)::text || ' / 13',
+         case when count(*) = 13 then 'PASS' else 'FAIL — a record type is unsearchable' end
+  from information_schema.columns
+  where table_schema='public' and column_name='search_vector'
+    and table_name in ('topics','subtopics','knowledge_entries','decisions','ideas','prompts',
+                       'prompt_versions','source_sessions','file_references','actions',
+                       'milestones','ingestion_records','context_snapshots')
+
+  union all
+  -- Current State and Master Topic Memory are derived reads, so they are
+  -- searched through the authoritative columns they are assembled from rather
+  -- than through a stored copy of the memory.
+  select 22, 'Current State is searchable at source',
+         case when pg_get_viewdef('search_documents'::regclass) like '%current_state%'
+              then 'topics.current_state feeds the topic vector' else 'NOT reachable' end,
+         case when exists (
+                select 1 from pg_attrdef d join pg_class c on c.oid = d.adrelid
+                join pg_attribute a on a.attrelid = c.oid and a.attnum = d.adnum
+                where c.relname='topics' and a.attname='search_vector'
+                  and pg_get_expr(d.adbin, d.adrelid) like '%current_state%')
+              then 'PASS' else 'FAIL — a phrase remembered from memory cannot be found' end
+
+  union all
+  select 23, 'duplicate fingerprints',
+         count(*)::text || ' / 4',
+         case when count(*) = 4 then 'PASS' else 'FAIL' end
+  from information_schema.columns
+  where table_schema='public' and column_name in ('content_hash','body_hash','raw_hash')
+    and table_name in ('knowledge_entries','prompt_versions','source_sessions','ingestion_records')
+
+  union all
+  -- Rule 17: detection PROPOSES. A unique constraint would decide instead.
+  select 24, 'fingerprints do not enforce uniqueness',
+         count(*)::text || ' unique constraints on a hash column',
+         case when count(*) = 0 then 'PASS'
+              else 'FAIL — a duplicate would be refused rather than proposed' end
+  from pg_indexes
+  where schemaname='public' and indexdef like '%UNIQUE%'
+    and (indexdef like '%content_hash%' or indexdef like '%body_hash%' or indexdef like '%raw_hash%')
+
+  union all
+  select 25, 'Phase 3 indexes',
+         count(*)::text || ' / 8',
+         case when count(*) = 8 then 'PASS' else 'FAIL' end
+  from pg_indexes
+  where schemaname='public' and indexname in (
+    'topics_search_idx','decisions_search_idx','sessions_search_idx','ingestion_search_idx',
+    'entries_content_hash_idx','sessions_raw_hash_idx','ingestion_status_idx','deletion_log_open_idx')
+
+  union all
+  select 26, 'search_documents is reachable by authenticated, not anon',
+         coalesce(string_agg(grantee || ':' || privilege_type, ', '), '(no grants)'),
+         case when count(*) filter (where grantee='anon') = 0
+               and count(*) filter (where grantee='authenticated' and privilege_type='SELECT') = 1
+              then 'PASS' else 'FAIL' end
+  from information_schema.role_table_grants
+  where table_schema='public' and table_name='search_documents'
 )
 select check_name, result, verdict from checks order by ord;

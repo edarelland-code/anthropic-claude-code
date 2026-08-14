@@ -1,10 +1,10 @@
 import Link from 'next/link';
-import { AlertTriangle, ArrowRight, Clock, History, Plus } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Clock, History, Inbox, Plus, Search } from 'lucide-react';
 
 import { TopicCard } from '@/components/topics/topic-card';
 import { TimelineList } from '@/components/timeline/timeline-list';
 import { getData } from '@/lib/data';
-import type { TopicSummary } from '@/lib/domain/types';
+import { OPEN_INGESTION_STATUSES, type TopicSummary } from '@/lib/domain/types';
 import { freshness } from '@/lib/utils';
 
 export const dynamic = 'force-dynamic';
@@ -30,6 +30,10 @@ export default async function HomePage() {
   const recent = await data.timeline.query({ workspaceId: workspace.id, limit: 8 });
   const topicNames = new Map(topics.map((t) => [t.topic.id, t.topic.name]));
 
+  // Anything captured but not yet filed. Surfaced on Home because an inbox you
+  // have to remember to visit is an inbox that quietly fills up.
+  const waiting = (await data.inbox.list(workspace.id, [...OPEN_INGESTION_STATUSES])).length;
+
   return (
     <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6 lg:py-8">
       <header className="flex flex-wrap items-end justify-between gap-3">
@@ -41,19 +45,55 @@ export default async function HomePage() {
               : `${topics.length} ${topics.length === 1 ? 'topic' : 'topics'} in ${workspace.name}.`}
           </p>
         </div>
-        <Link
-          href="/topics/new"
-          className="inline-flex items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-2.5 text-sm font-medium text-white hover:bg-indigo-500"
-        >
-          <Plus className="size-4" aria-hidden />
-          New topic
-        </Link>
+        <div className="flex flex-wrap items-center gap-2">
+          <Link
+            href="/search"
+            className="inline-flex min-h-11 items-center gap-1.5 rounded-md px-3 text-sm ring-1 ring-inset hairline hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+          >
+            <Search className="size-4 muted" aria-hidden />
+            Search
+          </Link>
+          <Link
+            href="/inbox?capture=1"
+            className="inline-flex min-h-11 items-center gap-1.5 rounded-md px-3 text-sm ring-1 ring-inset hairline hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+          >
+            <Inbox className="size-4 muted" aria-hidden />
+            Capture
+            {waiting > 0 && (
+              <span className="rounded-full bg-indigo-600 px-1.5 text-[11px] font-medium tabular-nums text-white">
+                {waiting}
+              </span>
+            )}
+          </Link>
+          <Link
+            href="/topics/new"
+            className="inline-flex min-h-11 items-center gap-1.5 rounded-md bg-indigo-600 px-3 text-sm font-medium text-white hover:bg-indigo-500"
+          >
+            <Plus className="size-4" aria-hidden />
+            New topic
+          </Link>
+        </div>
       </header>
 
       {topics.length === 0 ? (
         <FirstRun />
       ) : (
         <div className="mt-8 space-y-8">
+          {waiting > 0 && (
+            <Section title="Waiting in your Inbox" subtitle="captured, not yet filed">
+              <Link
+                href="/inbox"
+                className="flex items-center gap-3 rounded-lg p-3.5 surface hover:border-indigo-300 dark:hover:border-indigo-500/40"
+              >
+                <Inbox className="size-4 shrink-0 text-indigo-600 dark:text-indigo-400" aria-hidden />
+                <p className="min-w-0 flex-1 text-sm">
+                  {waiting} {waiting === 1 ? 'item is' : 'items are'} waiting to be filed.
+                </p>
+                <ArrowRight className="size-4 shrink-0 muted" aria-hidden />
+              </Link>
+            </Section>
+          )}
+
           {continueWorking.length > 0 && (
             <Section title="Continue working" subtitle="Topics with a defined next action">
               <ul className="space-y-2">
@@ -128,7 +168,7 @@ export default async function HomePage() {
             </Section>
           )}
 
-          <PhaseThreeNote />
+          <PhaseFourNote />
         </div>
       )}
     </div>
@@ -191,17 +231,18 @@ function FirstRun() {
 /**
  * Names what is still missing, and when it lands.
  *
- * Decisions, Ideas, Prompts, and the Timeline arrived in Phase 2 and are now
- * real, so they are no longer listed here. Quick Capture and the unsorted Inbox
- * are Phase 3 and stay named rather than mocked (rule 14).
+ * Rewritten each phase rather than left to rot. Quick Capture, the Inbox,
+ * transcript import and full-text search arrived in Phase 3 and are real now,
+ * so they are gone from here — a note that under-claims is as misleading as one
+ * that over-claims (rule 14).
  */
-function PhaseThreeNote() {
+function PhaseFourNote() {
   return (
     <p className="flex items-start gap-2 rounded-lg p-3.5 text-xs leading-5 muted surface">
       <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
       <span>
-        Quick Capture and the unsorted Inbox land in Phase 3, along with transcript import and
-        full-text search. They are absent rather than mocked.
+        Generating a Resume prompt for a fresh Claude session lands in Phase 4, and automatic
+        capture from Claude Code in Phase 5. Both are absent rather than mocked.
       </span>
     </p>
   );

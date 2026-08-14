@@ -232,6 +232,35 @@ begin
   select count(*) into n from prompt_winning_selections;
   if n <> 0 then raise exception 'FAIL: B reads A''s winning selection rows'; end if;
 
+  -- --- Phase 3: universal search must not leak -------------------------------
+  --
+  -- search_documents unions twelve tables, so it is the widest surface in the
+  -- schema and the most expensive one to get wrong: a single missing
+  -- security_invoker would hand a stranger another user's transcripts, prompt
+  -- bodies and decisions in one query. Checked on the real project, as a
+  -- non-superuser, exactly as PostgREST would run it.
+  select count(*) into n from search_documents where workspace_id = a_ws;
+  if n <> 0 then
+    raise exception 'FAIL: B reads % of A''s records through search_documents', n;
+  end if;
+
+  select count(*) into n from search_documents where topic_id = a_topic;
+  if n <> 0 then raise exception 'FAIL: B reads A''s records by topic through search'; end if;
+
+  -- The same shape as the timeline check above: B has rows of their own, so
+  -- the question is whether any row belongs to someone else.
+  select count(*) into n from search_documents where workspace_id <> b_ws;
+  if n <> 0 then
+    raise exception 'FAIL: an unfiltered search returns % foreign rows for B', n;
+  end if;
+
+  -- And a full-text query, which is how the application actually reads it.
+  select count(*) into n from search_documents
+   where search_vector @@ websearch_to_tsquery('english', 'icon');
+  if n <> 0 then
+    raise exception 'FAIL: a full-text search returned % of A''s records to B', n;
+  end if;
+
   execute 'reset role';
 
   -- A still sees their own timeline, so the view is not simply broken.
@@ -240,6 +269,8 @@ begin
   execute 'set local role authenticated';
   select count(*) into n from timeline_events where topic_id = a_topic;
   if n = 0 then raise exception 'FAIL: A cannot see their own timeline'; end if;
+  select count(*) into n from search_documents where topic_id = a_topic;
+  if n = 0 then raise exception 'FAIL: A cannot search their own records'; end if;
   execute 'reset role';
 
   -- --- A is untouched --------------------------------------------------------
@@ -255,7 +286,7 @@ begin
   execute 'reset role';
   perform set_config('request.jwt.claims', '', true);
 
-  raise notice 'ALL HOSTED RLS CHECKS PASSED, including the Phase 2 timeline and prompt views (%)', procedure_note;
+  raise notice 'ALL HOSTED RLS CHECKS PASSED, including the Phase 2 timeline and prompt views and the Phase 3 search projection (%)', procedure_note;
 end $$;
 
 select 'ALL HOSTED RLS CHECKS PASSED — nothing was persisted' as result;

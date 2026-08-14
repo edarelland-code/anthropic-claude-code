@@ -9,19 +9,25 @@
 import type {
   Action,
   ActionKind,
+  ConflictProposal,
   Decision,
   DecisionStatus,
+  DeletableEntityType,
+  DuplicateProposal,
   EntityType,
   FileReference,
   Idea,
   IdeaStatus,
   IngestionRecord,
+  IngestionStatus,
   KnowledgeEntry,
   KnowledgeType,
   Prompt,
   PromptVersion,
   Relationship,
   RelationshipType,
+  SearchHit,
+  SearchQuery,
   SourceSession,
   SourceType,
   TimelineEvent,
@@ -133,6 +139,8 @@ export interface EntryQuery {
   topicId?: string;
   subtopicId?: string;
   workspaceId?: string;
+  /** Every Layer 2 entry produced by one Layer 1 session. */
+  sourceSessionId?: string;
   types?: KnowledgeType[];
   sourceTypes?: SourceType[];
   /** Current State when true: active + not superseded. */
@@ -290,6 +298,7 @@ export interface ActionRepository {
 
 export interface FileRepository {
   listForTopic(topicId: string): Promise<FileReference[]>;
+  listForWorkspace(workspaceId: string, kinds?: FileReference['kind'][]): Promise<FileReference[]>;
   create(input: {
     topicId: string;
     subtopicId?: string | null;
@@ -297,32 +306,155 @@ export interface FileRepository {
     path?: string | null;
     url?: string | null;
     displayName?: string | null;
+    repoUrl?: string | null;
+    branch?: string | null;
+    commitSha?: string | null;
+    sourceSessionId?: string | null;
   }): Promise<FileReference>;
 }
 
 export interface SourceSessionRepository {
   listForTopic(topicId: string): Promise<SourceSession[]>;
+  listForWorkspace(workspaceId: string, limit?: number): Promise<SourceSession[]>;
   getById(id: string): Promise<SourceSession | null>;
   create(input: Omit<SourceSession, 'id' | 'createdAt'> & { id?: string }): Promise<SourceSession>;
 }
 
+/** A confirmed segment, on its way to becoming a knowledge entry. */
+export interface ConfirmedSegment {
+  knowledgeType: KnowledgeType;
+  title: string;
+  content?: string | null;
+  sourceReference?: string | null;
+  occurredAt?: string | null;
+  /** Below 1 only when the user accepted a suggestion rather than typing it. */
+  confidence?: number | null;
+}
+
 export interface InboxRepository {
-  list(workspaceId: string, status?: IngestionRecord['status']): Promise<IngestionRecord[]>;
+  list(workspaceId: string, statuses?: IngestionStatus[]): Promise<IngestionRecord[]>;
+  getById(id: string): Promise<IngestionRecord | null>;
+  countsByStatus(workspaceId: string): Promise<Record<string, number>>;
+
+  /**
+   * Quick Capture: one step.
+   *
+   * Everything except the content is optional, and the primary flow supplies
+   * none of it. The Inbox exists so capture never interrupts what the user was
+   * doing — asking for a topic at this moment would defeat the feature.
+   */
   capture(input: {
     workspaceId: string;
     rawContent: string;
     sourceType?: SourceType;
     contentType?: string;
+    adapterId?: string | null;
     sourceHint?: string | null;
     topicId?: string | null;
   }): Promise<IngestionRecord>;
-  assign(input: {
+
+  /**
+   * Files a captured item, writing the Inbox record, the Layer 1 session and
+   * every confirmed entry in one transaction.
+   *
+   * `segments` are CONFIRMED. Suggestions never reach this method — they are
+   * resolved to a typed value in the UI, by a person, first.
+   */
+  process(input: {
     id: string;
     topicId: string;
     subtopicId?: string | null;
-    knowledgeType: KnowledgeType;
+    segments: ConfirmedSegment[];
+    title?: string | null;
+    occurredAt?: string | null;
+    externalUrl?: string | null;
   }): Promise<IngestionRecord>;
-  discard(id: string): Promise<void>;
+
+  /** Files a fresh import in one call, without an Inbox round trip. */
+  ingest(input: {
+    workspaceId: string;
+    adapterId: string;
+    sourceType: SourceType;
+    contentType?: string;
+    raw: string;
+    payload?: Record<string, unknown> | null;
+    title?: string | null;
+    occurredAt?: string | null;
+    externalUrl?: string | null;
+    topicId?: string | null;
+    subtopicId?: string | null;
+    segments: ConfirmedSegment[];
+    code?: Record<string, unknown> | null;
+  }): Promise<IngestionRecord>;
+
+  setStatus(id: string, status: IngestionStatus): Promise<IngestionRecord>;
+}
+
+/**
+ * Universal search.
+ *
+ * Backed by the `search_documents` projection, which is `security_invoker` —
+ * row-level security on the twelve underlying tables, not this repository,
+ * decides what a caller can see. Ranking is `ts_rank_cd` plus recency: entirely
+ * deterministic, with no model anywhere in the path.
+ */
+export interface SearchRepository {
+  query(q: SearchQuery): Promise<SearchHit[]>;
+  /** Totals per type filter, for the counts beside each chip. */
+  countsByType(q: SearchQuery): Promise<Record<string, number>>;
+}
+
+/**
+ * Duplicate and conflict detection.
+ *
+ * Every method here READS. Nothing in this interface can merge, link or
+ * supersede anything — acting on a proposal is a separate, explicit call the
+ * user triggers (rule 17).
+ */
+export interface ProposalRepository {
+  /** Candidates matching text that may not have been written yet. */
+  duplicatesForText(input: {
+    workspaceId: string;
+    title: string;
+    content?: string | null;
+    /** Excluded from its own results. */
+    excludeEntryId?: string;
+  }): Promise<DuplicateProposal[]>;
+  /** A transcript or capture that appears to have been imported before. */
+  duplicateSources(input: {
+    workspaceId: string;
+    raw?: string | null;
+    externalUrl?: string | null;
+    commitSha?: string | null;
+  }): Promise<DuplicateProposal[]>;
+  /** Active decisions in one topic that appear to contradict each other. */
+  conflictingDecisions(topicId: string): Promise<ConflictProposal[]>;
+}
+
+/** A tombstone, with enough of the row to recognise what it was. */
+export interface DeletedRecord {
+  id: string;
+  workspaceId: string;
+  entityType: EntityType;
+  entityId: string;
+  title: string;
+  reason: string | null;
+  deletedAt: string;
+  restoredAt: string | null;
+}
+
+/**
+ * Soft delete and recovery.
+ *
+ * Both calls go through the database's own allowlist. `entityType` is a
+ * `DeletableEntityType` here so the compiler refuses `prompt_version` before
+ * the database has to — but the database refusing it is the guarantee, and this
+ * type only keeps the UI from offering a button that would raise.
+ */
+export interface RecycleRepository {
+  list(workspaceId: string, includeRestored?: boolean): Promise<DeletedRecord[]>;
+  softDelete(entityType: DeletableEntityType, entityId: string, reason?: string | null): Promise<string>;
+  restore(deletionLogId: string): Promise<string>;
 }
 
 /**
@@ -392,4 +524,7 @@ export interface DataContext {
   inbox: InboxRepository;
   relationships: RelationshipRepository;
   timeline: TimelineRepository;
+  search: SearchRepository;
+  proposals: ProposalRepository;
+  recycle: RecycleRepository;
 }

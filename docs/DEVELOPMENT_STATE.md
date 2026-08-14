@@ -5,13 +5,15 @@
 > `docs/ARCHITECTURE.md`; setup and deployment live in `docs/DEPLOYMENT.md`.
 
 **Last updated:** 2026-08-14
-**Current phase:** Phase 2 — Memory. **Complete.** Implemented, hosted-validated, and creatable
-end-to-end through the interface. Merged to `main`.
+**Current phase:** Phase 3 — Capture & retrieval. **Complete.** Implemented, hosted-validated, and
+usable end to end through the interface.
 
-Phase 1 is closed and merged (see "Phase 1 — closed" below).
+Phases 1 and 2 are closed and merged.
 
 Live at **<https://contextshelf.vercel.app>**, backed by Supabase `omhktzxwffaipmcoljic`, now
-carrying migration `0002` — 26 tables, 3 views, 35 policies.
+carrying migrations `0003` and `0004` — still **26 tables**, now 4 views and 35 policies. Phase 3
+added no table: Phase 0 had already modelled the Inbox, Layer 1 evidence, file references, tags
+and the deletion log.
 
 ---
 
@@ -29,6 +31,129 @@ These terms mean exactly this and nothing more:
 | **Production validated** | Verified on the deployed URL against the hosted Supabase project |
 | **Cross-device validated** | The same account was verified on two physical machines |
 
+
+---
+
+## Phase 3 — Capture & retrieval
+
+### What Phase 0 had already built
+
+The audit found the same thing it found in Phase 2, more strongly: the Inbox (`ingestion_records`,
+complete with `raw_content`, `payload`, `suggested_topic_id`, `created_entry_ids` and a status
+enum), Layer 1 evidence (`source_sessions`), file and URL references (`file_references`), tags,
+bearer tokens for a future ingest endpoint, and the deletion log all existed with the right
+columns. `knowledge_entries.search_vector` and two trigram indexes existed too.
+
+What was missing was retrieval **across** those records, a fingerprint to propose duplicates from,
+one transactional write path for imports, and a soft delete that actually wrote its tombstone.
+Phase 3 therefore adds **no table**, and Import History is a read of `ingestion_records` rather
+than a second audit trail.
+
+### Schema changes (0003, 0004)
+
+Split across two files because PostgreSQL refuses to USE an enum value in the transaction that
+added it, and `0004`'s view casts two of them.
+
+| Change | Why |
+|---|---|
+| `ingestion_status` gains `needs_review`, `partially_processed`, `failed`, `archived` | Triage needs a state for an item the extractor could not split, one for a partial import, one for a failure, and a terminal filing state. `discarded` kept as legacy, as `reversed` was |
+| `entity_type` gains `ingestion_record`, `context_snapshot` | So an inbox item can be linked and tagged, and a saved snapshot can be addressed as a search hit |
+| `content_fingerprint()` + generated hash columns on 4 tables | Duplicate **candidates**. Indexed, never unique — a unique constraint would refuse the second copy and decide on the user's behalf (rule 17) |
+| `search_vector` generated columns on 12 more tables | Universal search. Includes `topics.current_state` and `topics.goal`, which is how Current State and Master Topic Memory became searchable without a copy of either being stored |
+| `search_documents` view, `security_invoker = true` | One projection over every searchable record type (AD-17) |
+| `search_records()` / `search_type_counts()` | Deterministic ranking: `ts_rank_cd` with fixed state multipliers, ties broken on recency then id, so paging is a window on one total order |
+| `persist_ingestion()` | Inbox record + Layer 1 session + N Layer 2 entries in one transaction. `security invoker`, so RLS decides which workspace a caller may write to |
+| `soft_delete_record()` / `restore_record()` | Explicit allowlist of statically compiled statements. No dynamic SQL, so no argument can name a table |
+
+### Clarifications carried into the build
+
+1. **Search covers Current State and Master Topic Memory** by indexing the authoritative columns
+   they are assembled from, not by storing a copy of either. `context_snapshots` participate as
+   history: every hit reports `record_state` of `current`, `historical` or `snapshot`, so a saved
+   rendering is never mistaken for the live answer.
+2. **Quick Capture stayed one step.** The capture schema requires `content` and nothing else — no
+   topic, subtopic, type, source, tag or classification. Asserted on the hosted deployment:
+   *"capture required nothing but content — status unsorted, topic none"*.
+3. **The soft-delete functions use an explicit allowlist**, not interpolated table names. Tested
+   for unsupported types, immutable types, cross-workspace rows, and the impossibility of naming
+   an arbitrary table.
+4. **Suggestions stayed suggestions.** Path B returns `Suggestion<T>` rather than `T`, so a caller
+   must reach through `.value`; confidence caps at 0.75; every suggestion carries its literal
+   evidence. In the UI, rows read from a label start included and suggestions start **excluded**,
+   so clicking straight through records only what the text actually stated.
+
+### Issues found and fixed
+
+| # | Severity | Issue | Fix |
+|---|---|---|---|
+| 28 | **High — would have over-captured** | A `Decision:` label consumed every paragraph after it, so prose nobody called a decision would have been filed inside one | Labels and speaker turns end at a blank line; headings keep their sections |
+| 29 | Medium | `Assistant: Decision: ship it` was read as a speaker turn and the label inside discarded — throwing away the only part of the line that said what to record | Speaker prefixes are stripped, then the remainder is re-checked for a label |
+| 30 | **Medium — a check that lied** | `EXPLAIN` in text form returns one row per line, and `execute … into` keeps only the first. Every plan assertion in the new performance suite was silently comparing against `"Limit (cost=…)"` and passing vacuously | `format json`, which is one row |
+| 31 | **Medium — a test that measured nothing** | The performance seed put the search term in all 4,000 rows. A term present in every row is correctly answered by a sequential scan, so the index assertion could never have meant anything | Distinctive terms on ~1 row in 800 |
+| 32 | Medium | `TopicCard`'s count list used `truncate` on a flex item without `min-w-0`, so it refused to shrink below its text and pushed the card 32px past the viewport at 390 and 47px at 375 | `min-w-0 flex-1` |
+| 33 | Medium | The responsive audit flagged the search filter chips' visually-hidden radios as 1px touch targets, measuring the input rather than the 44px label that is actually tappable | The audit measures the associated label's box when a control is smaller than the minimum — and only when that label passes on its own |
+| 34 | **Medium — half the harness was blind** | `responsive-qa.mjs` carried its own copy of the browser launcher which knew nothing about the proxy, so it failed on URLs the harness spawning it fetched successfully | One launcher, shared |
+| 35 | Low | Four sidebar sections still carried "P2" badges after Phase 2 shipped, and Home promised Phase 3 features that already existed | Rule 14 cuts both ways; both corrected |
+| 36 | **Medium — a grid item that could not shrink** | `TopicCard` is a grid item, and a grid item defaults to `min-width: auto`, so it refuses to compress below its own min-content. Measured at 406px against a 358px track — identically at 390 and 375, which is what identified it as a fixed floor rather than a content effect | `min-w-0` on the card root, so the track is authoritative and the `truncate` rules inside can work |
+| 37 | Medium | Search result titles were 16px touch targets — an inline anchor around one line of text, the same defect Phase 2 fixed on the Timeline and the section pages | `inline-block min-h-11 py-2` with the padding negative-margined away, so the target grows without the layout moving |
+| 38 | **Medium — two wrong diagnoses before the right one** | The responsive audit named the first three elements past the viewport in document order, which are always the outermost containers. Every overflow therefore read as "the card is too wide", and the real culprit was guessed at — wrongly | It now reports the elements that exceed **their own parent's** content box, with width and min-content, which names the break point instead of describing the symptom |
+| 39 | **Medium — a validation run against a stale build** | A backgrounded `vercel --prod \| grep "ready."` swallowed the deploy's output, and because a pipeline's exit status is `tail`'s, the `&&` after it proceeded regardless. Two rounds of "the fix did not work" were actually the previous build | Deploys are checked unfiltered; the audit's class strings are what exposed it, since they still showed the old markup |
+
+### The leakproof limit — a real, documented limitation
+
+**Full-text search cannot use its GIN index for a real user, at any volume.**
+
+A row-level security policy is a security-barrier qualifier, and PostgreSQL will not evaluate a
+non-leakproof operator before one — doing so could reveal values from rows the policy exists to
+hide. An index condition is evaluated inside the scan, before that qualifier, so a non-leakproof
+operator cannot be an index condition at all. `ts_match_vq` (the `@@` operator) and `ILIKE` are
+both marked not leakproof in stock PostgreSQL; equality is leakproof.
+
+Consequences on every RLS-protected table:
+
+- full-text search scans the rows the policy admits, however many GIN indexes exist
+- fingerprint equality, foreign keys and ordering all keep their indexes
+
+Establishing this took three attempts, and the first two conclusions were wrong. A casual plan
+reading suggests the opposite: with sequential scans merely discouraged, the planner shows a
+Bitmap Heap Scan and looks healthy — but the index it picks is `entries_workspace_recent_idx`,
+driven by the leakproof `workspace_id` equality, with `@@` applied afterwards as a filter. The
+search index is not involved. `07_performance.test.sql` settles it by dropping the workspace
+predicate and penalising sequential scans by 1e10: at that price the planner would take any index
+available, and as `authenticated` it still scans, while the owner running the identical statement
+gets the GIN index.
+
+**This is not a Phase 3 regression.** `entries_search_idx` has been unusable by real users since
+Phase 0. It stayed invisible because query plans had only ever been inspected as the table owner,
+who bypasses RLS — which is why the performance suite now runs as `authenticated` throughout.
+
+**Measured cost today:** 35 ms for a full-text scan across 4,000 entries; 44 ms for a full
+`search_records` call across 4,200 records. It grows linearly with the workspace.
+
+**Not fixed, deliberately.** Every available fix changes the authorisation model:
+
+| Option | What it costs |
+|---|---|
+| `ALTER FUNCTION ts_match_vq(tsvector,tsquery) LEAKPROOF` | Superuser, and a database-wide change to a system function's security marking |
+| `search_records()` as `SECURITY DEFINER` with its own `is_workspace_member()` gate | Moves authorisation for search out of RLS — a second authorisation surface, which is the thing AD-17 exists to avoid |
+| Accept it and revisit when volume demands | Nothing, until a workspace is large enough for 35 ms to become 350 ms |
+
+Phase 3 ships the third. The first two are the user's call, not a unilateral one.
+
+### Not done in Phase 3
+
+- **File uploads.** `file_references.kind` has an `upload` value and a `storage_path` column
+  waiting, but no object store is wired. The UI offers references and links only and says so —
+  an upload control that stored a filename and no file would be exactly the fake rule 13 forbids.
+  Lands in Phase 5 with the ingestion endpoint.
+- **`POST /api/ingest`.** `ingestion_tokens` exists; the endpoint is Phase 5, and no
+  unauthenticated ingestion surface was opened.
+- **Model-assisted classification.** Phase 3 is deterministic by design (ARCHITECTURE §9 stage 4).
+  Phase 6 may replace the mechanism; it does not get to replace the confirm gate.
+- The three Phase 2 gaps (re-rating UI, relationship editing, supersede/lifecycle buttons) are
+  still open.
+
+These are named rather than mocked (rule 14).
 
 ---
 
@@ -140,7 +265,35 @@ determines which tools work.
 | HTTPS to `api.supabase.com`, `*.supabase.co`, `vercel.com`, `api.vercel.com` | **reachable** |
 | Postgres wire protocol — pooler `:5432` and `:6543` | **blocked**, connection times out |
 | Postgres wire protocol — `db.<ref>.supabase.co:5432` | **unreachable**, IPv6-only host, no IPv6 |
-| Chromium to any external HTTPS host | **blocked**, tunnels reset (`curl` and Node reach the same hosts) |
+| Chromium to an allowlisted HTTPS host | **reachable**, with the TLS 1.2 cap below |
+
+The Chromium row previously read "blocked". That was a symptom, not the constraint. Chromium's
+TLS 1.3 ClientHello carries a post-quantum key share and runs to roughly 1,700 bytes, spanning
+more than one TCP segment, and the relay beyond the proxy resets the connection when it does — so
+the tunnel is established (`200 Connection Established`) and then dies mid-handshake, surfacing as
+a bare `ERR_CONNECTION_RESET` on a URL `curl` fetches perfectly, with nothing in the proxy's own
+log. Read out of Chromium's own net log: a 1,733-byte ClientHello followed immediately by
+`ECONNRESET`.
+
+A second, independent problem sits behind the same symptom: the proxy re-signs *some* hosts with
+its own CA and tunnels others through, and which is which changes between runs. A run that had
+been passing failed mid-way with `ERR_CERT_AUTHORITY_INVALID` when a host it had been tunnelling
+started being intercepted. Every other tool here is already told to trust that CA; Chromium reads
+none of those, only the NSS database, and populating that needs `certutil`, which is absent.
+
+`scripts/chromium-path.mjs` therefore does two things **when a proxy is configured**:
+
+- caps at TLS 1.2, keeping the ClientHello inside one segment;
+- passes the CA bundle's public-key fingerprints via
+  `--ignore-certificate-errors-spki-list`, computed from the bundle at launch so a rotated CA is
+  picked up and nothing can go stale.
+
+Despite its name that flag is not `--ignore-certificate-errors`: it names exact public keys to
+accept, which is what installing the CA would do. Nothing outside the bundle is trusted, chain,
+hostname and expiry are all still verified, and a bad certificate still fails the run.
+
+The end-to-end validation now drives the **real deployed URL** rather than a local production
+build.
 
 Three consequences, each with the workaround actually used:
 
@@ -152,10 +305,13 @@ Three consequences, each with the workaround actually used:
   `npm run schema:parity` instead: the real migration is applied to a throwaway cluster and the
   catalogs are compared against hosted. This is a catalog comparison, not a byte-for-byte DDL
   diff, and should never be reported as "db diff clean".
-- **The browser cannot reach the deployed URL**, so the end-to-end run drives a local production
-  build that talks to the *real hosted Supabase*. The database, auth, persistence and isolation
-  under test are all hosted; only Vercel's edge serving is out of the browser's reach, and that
-  was verified separately over HTTP.
+- **The browser reaches the deployed URL** as of Phase 3, so the end-to-end run drives
+  <https://contextshelf.vercel.app> itself — Vercel's edge serving included — against the real
+  hosted Supabase.
+- **`supabase db push` still cannot run**, so `npm run db:push:hosted` applies migrations over the
+  Management API and records them in the same `supabase_migrations.schema_migrations` ledger
+  `db push` would write. Phase 2 did this by hand with `curl`; it is now a script, so the next
+  phase does not rediscover it.
 
 The database password never entered into any of this. `supabase link` succeeded without one, and
 `db push` failed on a TCP timeout before any password was requested.

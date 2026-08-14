@@ -62,6 +62,13 @@ const stamp = Date.now().toString(36);
 const USER_A = `hello+contextshelf-qa-a-${stamp}@nomorefilth.com`;
 const USER_B = `hello+contextshelf-qa-b-${stamp}@nomorefilth.com`;
 
+const PUBLISHABLE_KEY =
+  envValue('NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY') ?? envValue('NEXT_PUBLIC_SUPABASE_ANON_KEY');
+if (!PUBLISHABLE_KEY) {
+  console.error('NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY must be in .env.local.');
+  process.exit(2);
+}
+
 const admin = createClient(SUPABASE_URL, SECRET_KEY, { auth: { autoRefreshToken: false, persistSession: false } });
 
 const results = [];
@@ -86,6 +93,25 @@ async function signIn(page, email) {
   const hash = await signInLink(email);
   await page.goto(`${BASE}/auth/confirm?token_hash=${hash}&type=magiclink`, { waitUntil: 'networkidle' });
   return page.url();
+}
+
+/**
+ * A Supabase client holding a REAL user session.
+ *
+ * The admin client bypasses row-level security, so calling `search_records` or
+ * `soft_delete_record` through it would prove the functions run and nothing
+ * about who may run them. These are the calls where authorisation is the whole
+ * point, so they go through a session minted the same way the browser's was —
+ * one more magic link, verified against the same project.
+ */
+async function userClient(email) {
+  const hash = await signInLink(email);
+  const client = createClient(SUPABASE_URL, PUBLISHABLE_KEY, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+  const { error } = await client.auth.verifyOtp({ token_hash: hash, type: 'magiclink' });
+  if (error) throw new Error(`user session for ${email}: ${error.message}`);
+  return client;
 }
 
 async function deleteUser(email) {
@@ -289,12 +315,16 @@ try {
 
   const { data: pRows } = await admin.from('prompts').select('*').eq('title', PROMPT);
   const promptRow = (pRows ?? [])[0] ?? null;
+  // Kept for the Phase 3 allowlist check, which needs a real prompt_version id
+  // to prove the refusal is about the TYPE rather than about a missing row.
+  let promptVersionId = null;
   record('prompt created through the UI', Boolean(promptRow), promptRow ? `id ${promptRow.id}` : 'no row');
 
   if (promptRow) {
     const { data: v1rows } = await admin
       .from('prompt_versions').select('*').eq('prompt_id', promptRow.id).order('version');
     const v1 = (v1rows ?? [])[0] ?? null;
+    promptVersionId = v1?.id ?? null;
     record('version 1 created', v1?.version === 1 && String(v1?.body).includes('VERSION ONE BODY'), `v${v1?.version}`);
 
     // The evaluation must be an appended outcome, never written onto v1.
@@ -349,6 +379,223 @@ try {
     kinds.has('decision') && kinds.has('idea') && kinds.has('prompt_version'),
     [...kinds].join(', '));
 
+  // --- Phase 3: capture, triage, search, files, recovery -------------------
+  //
+  // Every assertion below reads a ROW (AD-16). Twice in Phase 2 a page-content
+  // check passed while the table it claimed to prove was empty, because the
+  // submit had been routed to a different form on the same page. Text on a page
+  // is evidence the app rendered something; only the row is evidence of
+  // persistence.
+  heading('M. Quick Capture — one step, nothing else required');
+  const CAPTURE_MARK = `zucchini-${stamp}`;
+  const CAPTURE_TEXT = [
+    `User: should the ${CAPTURE_MARK} icon be blue?`,
+    'Assistant: blue reads as a status dot at 16px.',
+    '',
+    'Decision: use the slash geometry',
+    '',
+    'Next step: render it at 16px and check',
+  ].join('\n');
+
+  await a.goto(`${BASE}/inbox`, { waitUntil: 'networkidle' });
+  const captureForm = 'form:has(textarea[name="content"])';
+  await a.fill(`${captureForm} textarea[name="content"]`, CAPTURE_TEXT);
+  await a.click(`${captureForm} button[type="submit"]`);
+  await a.waitForFunction(() => /Saved to your Inbox/i.test(document.body.innerText), null, {
+    timeout: 20_000,
+  }).catch(() => {});
+
+  const { data: captured } = await admin
+    .from('ingestion_records')
+    .select('id,status,topic_id,raw_content,created_entry_ids,raw_hash')
+    .like('raw_content', `%${CAPTURE_MARK}%`);
+  const capture = (captured ?? [])[0] ?? null;
+  record('capture row exists in hosted Postgres', Boolean(capture), capture ? `id ${capture.id}` : 'no row');
+
+  if (capture) {
+    // CLARIFICATION 2, asserted rather than assumed: a capture that demanded a
+    // topic would arrive already filed, and the Inbox would be pointless.
+    record('capture required nothing but content',
+      capture.status === 'unsorted' && capture.topic_id === null,
+      `status ${capture.status}, topic ${capture.topic_id ?? 'none'}`);
+    record('captured text stored verbatim',
+      String(capture.raw_content).includes('slash geometry'), 'raw preserved');
+    record('fingerprint generated for duplicate proposals',
+      typeof capture.raw_hash === 'string' && capture.raw_hash.length === 64,
+      capture.raw_hash ? `${capture.raw_hash.slice(0, 12)}…` : 'missing');
+  }
+
+  heading('N. Triage — extraction, the confirm gate, and the fan-out');
+  let sessionId = null;
+  if (capture) {
+    await a.goto(`${BASE}/inbox/${capture.id}`, { waitUntil: 'networkidle' });
+
+    // Path A read two labelled lines out of the transcript. They are the rows
+    // that arrive pre-checked; everything else is a suggestion the user would
+    // have to opt into, which is exactly what is NOT done here.
+    await a.selectOption('select[name="topicId"]', topicId).catch(() => {});
+    await Promise.all([
+      a.waitForURL(/\/topics\/[0-9a-f-]{36}/, { timeout: 30_000 }).catch(() => {}),
+      a.click('form button[type="submit"]'),
+    ]);
+
+    const { data: sessions } = await admin
+      .from('source_sessions')
+      .select('id,raw_content,topic_id,raw_hash')
+      .eq('topic_id', topicId)
+      .like('raw_content', `%${CAPTURE_MARK}%`);
+    const session = (sessions ?? [])[0] ?? null;
+    sessionId = session?.id ?? null;
+    record('Layer 1 evidence written', Boolean(session), session ? `id ${session.id}` : 'no session row');
+
+    if (session) {
+      const { data: fanned } = await admin
+        .from('knowledge_entries')
+        .select('id,title,knowledge_type,source_reference,confidence')
+        .eq('source_session_id', session.id);
+      const produced = fanned ?? [];
+
+      // Rule 4: one session fans out into many entries, never one generic card.
+      record('one session fanned out into many entries', produced.length >= 2,
+        `${produced.length} entries`);
+
+      // Rule 10: every entry points back at the evidence, with an anchor.
+      record('every entry carries provenance back to Layer 1',
+        produced.length > 0 && produced.every((e) => e.source_reference),
+        produced.map((e) => e.source_reference).join(', ') || 'none');
+
+      // Clarification 4: only what the transcript stated was recorded. A
+      // suggestion would have arrived at confidence below 1, and none was
+      // confirmed here — so anything under 1 means a guess was written.
+      const guesses = produced.filter((e) => e.confidence !== null && e.confidence < 1);
+      record('no suggestion was recorded without confirmation', guesses.length === 0,
+        guesses.length ? `${guesses.length} unconfirmed` : 'only stated types');
+
+      const types = [...new Set(produced.map((e) => e.knowledge_type))].sort();
+      record('the labelled types were read from the text',
+        types.includes('decision') && types.includes('next_step'), types.join('/'));
+
+      const { data: after } = await admin
+        .from('ingestion_records').select('status').eq('id', capture.id).single();
+      record('the original capture survives filing', after?.status === 'archived',
+        `original is ${after?.status}`);
+    }
+  }
+
+  heading('O. Universal search');
+  // One user-scoped session for every Phase 3 RPC below, so each of them is
+  // subject to the caller's own policies exactly as the app is.
+  const userA = await userClient(USER_A);
+  if (dbTopic) {
+    // The Phase 3 exit criterion: search reaches inside a pasted transcript.
+    const { data: inside } = await userA.rpc('search_records', {
+      p_workspace_id: dbTopic.workspace_id, p_query: CAPTURE_MARK,
+    });
+    record('search reaches inside a transcript', (inside ?? []).length > 0,
+      `${(inside ?? []).length} hit(s)`);
+
+    // Clarification 1: Current State is searchable through the authoritative
+    // column it lives in, with no copy of the derived memory stored anywhere.
+    const STATE_MARK = `trapezoid-${stamp}`;
+    await admin.from('topics').update({ current_state: `Waiting on the ${STATE_MARK} review` })
+      .eq('id', dbTopic.id);
+    const { data: stateHits } = await userA.rpc('search_records', {
+      p_workspace_id: dbTopic.workspace_id, p_query: STATE_MARK,
+    });
+    const stateHit = (stateHits ?? [])[0] ?? null;
+    record('Current State is findable through search',
+      stateHit?.entity_id === dbTopic.id && stateHit?.entity_type === 'topic',
+      stateHit ? `${stateHit.entity_type} · ${stateHit.record_state}` : 'no hit');
+
+    // Every hit says whether it is still true.
+    const states = [...new Set((inside ?? []).map((h) => h.record_state))];
+    record('hits report whether they are current or history',
+      states.length > 0 && states.every((st) => ['current', 'historical', 'snapshot'].includes(st)),
+      states.join('/'));
+
+    // Ranking is deterministic: the same query twice gives the same order.
+    const { data: again } = await userA.rpc('search_records', {
+      p_workspace_id: dbTopic.workspace_id, p_query: CAPTURE_MARK,
+    });
+    record('ranking is deterministic',
+      JSON.stringify((inside ?? []).map((h) => h.entity_id)) ===
+        JSON.stringify((again ?? []).map((h) => h.entity_id)),
+      'identical order across runs');
+  }
+
+  heading('P. File references');
+  await a.goto(`${BASE}/files`, { waitUntil: 'networkidle' });
+  const FILE_PATH = `src/icons/relay-${stamp}.tsx`;
+  const fileForm = 'form:has(input[name="path"])';
+  await a.click('button:has-text("Add a file or link reference")').catch(() => {});
+  await a.fill(`${fileForm} input[name="path"]`, FILE_PATH).catch(() => {});
+  await a.selectOption(`${fileForm} select[name="topicId"]`, topicId).catch(() => {});
+  await a.click(`${fileForm} button[type="submit"]`).catch(() => {});
+  await a.waitForFunction(() => /Reference saved/i.test(document.body.innerText), null, {
+    timeout: 20_000,
+  }).catch(() => {});
+
+  const { data: fileRows } = await admin
+    .from('file_references').select('id,path,kind,storage_path').eq('path', FILE_PATH);
+  const fileRow = (fileRows ?? [])[0] ?? null;
+  record('file reference row exists', Boolean(fileRow), fileRow ? `kind ${fileRow.kind}` : 'no row');
+  if (fileRow) {
+    // Rule 13: nothing claims to hold bytes it does not have.
+    record('no upload was faked', fileRow.kind === 'repo_file' && fileRow.storage_path === null,
+      'reference only, no stored object');
+  }
+
+  heading('Q. Soft delete, recovery, and what refuses to be deleted');
+  if (dbTopic) {
+    const { data: victims } = await admin
+      .from('knowledge_entries').select('id,title').eq('topic_id', dbTopic.id).limit(1);
+    const victim = (victims ?? [])[0] ?? null;
+
+    if (victim) {
+      const { data: logId, error: delErr } = await userA.rpc('soft_delete_record', {
+        p_entity_type: 'knowledge_entry', p_entity_id: victim.id, p_reason: 'hosted validation',
+      });
+      const { data: gone } = await admin
+        .from('knowledge_entries').select('deleted_at').eq('id', victim.id).single();
+      record('delete stamps the row and writes a tombstone',
+        !delErr && Boolean(logId) && gone?.deleted_at !== null,
+        delErr ? delErr.message : `log ${String(logId).slice(0, 8)}…`);
+
+      const { data: restored, error: resErr } = await userA.rpc('restore_record', {
+        p_deletion_log_id: logId,
+      });
+      const { data: back } = await admin
+        .from('knowledge_entries').select('deleted_at').eq('id', victim.id).single();
+      record('restore brings the record back',
+        !resErr && restored === victim.id && back?.deleted_at === null,
+        resErr ? resErr.message : 'deleted_at cleared');
+    }
+
+    // Clarification 3, on the real project: the allowlist refuses append-only
+    // history and Layer 1 evidence, and no argument can name another table.
+    const { error: pvErr } = await userA.rpc('soft_delete_record', {
+      p_entity_type: 'prompt_version', p_entity_id: promptVersionId ?? dbTopic.id, p_reason: null,
+    });
+    record('append-only history refuses to be deleted',
+      Boolean(pvErr) && /append-only/i.test(pvErr.message), pvErr?.message ?? 'ACCEPTED — rule 6 broken');
+
+    if (sessionId) {
+      const { error: ssErr } = await userA.rpc('soft_delete_record', {
+        p_entity_type: 'source_session', p_entity_id: sessionId, p_reason: null,
+      });
+      const { data: stillThere } = await admin
+        .from('source_sessions').select('id').eq('id', sessionId).single();
+      record('Layer 1 evidence refuses to be deleted',
+        Boolean(ssErr) && Boolean(stillThere), ssErr?.message ?? 'ACCEPTED — rule 10 broken');
+    }
+
+    const { error: badType } = await userA.rpc('soft_delete_record', {
+      p_entity_type: 'workspace_members', p_entity_id: dbTopic.id, p_reason: null,
+    });
+    record('an arbitrary table name cannot be passed as an entity type',
+      Boolean(badType), badType?.message?.slice(0, 60) ?? 'ACCEPTED');
+  }
+
   // --- C. Persists across a hard reload -------------------------------------
   heading('C. Persistence across a hard reload');
   await a.reload({ waitUntil: 'networkidle' });
@@ -390,6 +637,26 @@ try {
     const denied = !body.includes(TOPIC);
     record('direct topic URL is denied to the second account', denied, denied ? 'not found' : 'LEAKED');
   }
+
+  // The widest surface in the schema, checked on the real project as the real
+  // `authenticated` role: search_documents unions twelve tables, so one missing
+  // security_invoker would hand a stranger another account's transcripts,
+  // prompt bodies and decisions in a single query.
+  if (dbTopic) {
+    const userB = await userClient(USER_B);
+    const { data: leak } = await userB.rpc('search_records', {
+      p_workspace_id: dbTopic.workspace_id, p_query: CAPTURE_MARK,
+    });
+    record("search does not leak the first account's records",
+      (leak ?? []).length === 0,
+      (leak ?? []).length ? `LEAKED ${(leak ?? []).length} row(s)` : 'nothing returned');
+
+    const { data: ownLeak } = await userB
+      .from('search_documents').select('workspace_id').neq('workspace_id', dbTopic.workspace_id).limit(5);
+    record('an unfiltered search read returns no foreign rows',
+      (ownLeak ?? []).length === 0, `${(ownLeak ?? []).length} foreign row(s)`);
+  }
+
   await ctxB.close();
 
   // --- L. Export the session for authenticated responsive QA ----------------

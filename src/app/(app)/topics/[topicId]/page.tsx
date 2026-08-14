@@ -54,6 +54,11 @@ export default async function TopicPage({ params }: { params: Promise<{ topicId:
     sessions: ctx.sessions,
     milestones: ctx.milestones,
   });
+  // Decisions that appear to say different things about the same subject.
+  // A read, computed on every load — proposing costs nothing and storing a
+  // proposal would create a second thing to keep in step (rule 17).
+  const conflicts = await data.proposals.conflictingDecisions(topicId);
+
   const fresh = freshness(topic.lastMeaningfulUpdateAt);
   const nextStep = openActions.find((a) => a.kind === 'next_step') ?? null;
   const days = groupByDay(timeline, (e) => e.occurredAt);
@@ -111,8 +116,8 @@ export default async function TopicPage({ params }: { params: Promise<{ topicId:
               </h2>
               {activeDecisions.length === 0 ? (
                 <p className="mt-3 text-sm leading-5 muted">
-                  None recorded. The Decision Ledger — with reasons, alternatives, and supersession
-                  — is built in Phase 2.
+                  None recorded yet. Record one from the Decisions section, and it carries its
+                  reason and whatever it replaced.
                 </p>
               ) : (
                 <ul className="mt-3 space-y-2.5">
@@ -123,6 +128,37 @@ export default async function TopicPage({ params }: { params: Promise<{ topicId:
                     </li>
                   ))}
                 </ul>
+              )}
+
+              {/*
+                A proposal, and only a proposal (rule 17). Nothing is merged,
+                superseded or reordered by this — it points at two decisions and
+                says they look like they overlap. Acting on it means superseding
+                one, which demands a reason of its own.
+              */}
+              {conflicts.length > 0 && (
+                <div className="mt-3 rounded-md p-3 ring-1 ring-inset ring-amber-600/30">
+                  <p className="text-xs font-medium text-amber-800 dark:text-amber-300">
+                    These may contradict each other
+                  </p>
+                  <ul className="mt-1.5 space-y-1.5">
+                    {conflicts.map((c) => (
+                      <li key={`${c.decisionId}-${c.conflictsWithId}`} className="text-xs leading-5">
+                        <Link href={`/decisions#${c.decisionId}`} className="font-medium hover:underline">
+                          {c.decisionTitle}
+                        </Link>
+                        <span className="muted"> and </span>
+                        <Link href={`/decisions#${c.conflictsWithId}`} className="font-medium hover:underline">
+                          {c.conflictsWithTitle}
+                        </Link>
+                        <span className="muted"> — {c.reason}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="mt-1.5 text-[11px] muted">
+                    Nothing has been changed. Compared by title, not by reading them.
+                  </p>
+                </div>
               )}
             </section>
 

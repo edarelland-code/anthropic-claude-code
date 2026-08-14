@@ -3,9 +3,13 @@
 Companion to `supabase/migrations/0001_init.sql`. The migration is the authority; this file
 explains **why** the shape is what it is, and how to query it correctly.
 
-**Validated against a real PostgreSQL 16** by `npm run test:db`, which applies this exact
-migration to an ephemeral cluster and runs `supabase/tests/*.test.sql`. Not yet applied to a
-hosted Supabase project — see `docs/DEVELOPMENT_STATE.md`.
+Now four migrations: `0001_init`, `0002_memory`, `0003_capture_enums`, `0004_capture`. `0003`
+carries only enum values, because PostgreSQL refuses to USE a value in the transaction that added
+it and `0004`'s view casts two of them.
+
+**Validated against a real PostgreSQL 16** by `npm run test:db`, which applies these exact
+migrations to an ephemeral cluster and runs `supabase/tests/*.test.sql`. Applied to the hosted
+Supabase project and verified there — see `docs/DEVELOPMENT_STATE.md`.
 
 Design rationale: `docs/ARCHITECTURE.md` §6–8. Permanent rules: `/CLAUDE.md`.
 
@@ -205,20 +209,102 @@ the secret key resolves to `service_role`. Only the environment variable names c
 
 ## Search
 
-- `knowledge_entries.search_vector` — generated `tsvector`, title weighted `A`, content `B`, GIN
-  indexed.
-- `source_sessions.raw_content` and `prompt_versions.body` — `gin_trgm_ops`, so search reaches
-  inside raw transcripts and prompt bodies rather than only summaries.
+Thirteen tables carry a generated `search_vector`, each GIN indexed, with one weighting
+convention: `A` = the name you would recognise the record by, `B` = its substance, `C` =
+supporting detail, `D` = bulk verbatim text. `source_sessions.raw_content` is capped at 200k
+characters before tokenising, because `to_tsvector` rejects input over 1 MB.
+
+`search_documents` unions all of them, `with (security_invoker = true)`, and exposes a
+`record_state` of `current`, `historical` or `snapshot` on every row.
+
+Do not query the view directly from the app. `search_records()` adds the ranking, and one
+definition of "best match" is the point:
 
 ```sql
-select * from knowledge_entries
-where workspace_id = $1
-  and search_vector @@ websearch_to_tsquery('english', $2)
-order by ts_rank(search_vector, websearch_to_tsquery('english', $2)) desc;
+select * from search_records(
+  p_workspace_id => $1,
+  p_query        => $2,          -- websearch syntax: quotes, or, -excluded
+  p_entity_types => array['decision','knowledge_entry'],
+  p_record_states=> array['current'],
+  p_limit        => 30
+);
 ```
+
+Ranking is `ts_rank_cd` multiplied by a fixed state constant (current 1.0, historical 0.6,
+snapshot 0.4), then ordered by recency and finally by id — a **total** order, so paging cannot
+drop or repeat a row between pages.
+
+### Current State and Master Topic Memory are searchable without being stored
+
+Both are derived reads (rule 8, AD-8), so neither can be indexed and neither has a copy made of
+it. Instead the authoritative columns they are assembled from carry the vectors —
+`topics.current_state` and `topics.goal` among them — so a phrase remembered from the memory panel
+resolves to the record that produced it. Saved `context_snapshots` participate as history, labelled
+`snapshot`.
+
+### The leakproof limit
+
+**`@@` cannot use a GIN index under row-level security.** A policy is a security-barrier
+qualifier, and PostgreSQL will not evaluate a non-leakproof operator before one; `ts_match_vq` is
+marked not leakproof. So full-text reads scan the rows the policy admits, while equality
+predicates (`content_hash`, foreign keys) and ordering keep their indexes.
+
+Asserted in `supabase/tests/07_performance.test.sql`, and measured: 35 ms across 4,000 entries,
+growing linearly. Read plans as `authenticated`, never as the owner — the owner bypasses RLS and
+gets a plan no real user will see. Full reasoning and the options in
+`docs/DEVELOPMENT_STATE.md`.
 
 If semantic search is ever needed, `pgvector` is available in the same database. Deliberately not
 built now (risk R9).
+
+---
+
+## Duplicate and conflict proposals
+
+`content_fingerprint(text)` — trimmed, whitespace-collapsed, case-folded, SHA-256 — is generated
+onto `knowledge_entries.content_hash`, `prompt_versions.body_hash`, `source_sessions.raw_hash` and
+`ingestion_records.raw_hash`. `src/lib/ingestion/fingerprint.ts` computes the identical value for
+text that has not been inserted yet, which is what lets triage propose a duplicate *before*
+writing.
+
+Every one of those is a plain index, never a unique constraint. A unique constraint would refuse
+the second copy at the database level — deciding on the user's behalf and losing the content —
+where rule 17 says detection proposes and the user confirms.
+
+---
+
+## Importing
+
+`persist_ingestion()` writes the Inbox record, the Layer 1 session and every Layer 2 entry in one
+transaction, because PostgREST cannot span calls transactionally and a half-written import would
+otherwise be reachable. It is `security invoker`: `p_workspace_id` can only ever be a workspace the
+caller belongs to, because every insert is checked by the same policy an ordinary client insert
+would hit.
+
+It never classifies. Segments arrive already extracted deterministically or already confirmed by a
+person.
+
+---
+
+## Deleting
+
+`soft_delete_record(entity_type, id, reason)` stamps `deleted_at` and writes the `deletion_log`
+tombstone in one transaction; `restore_record(deletion_log_id)` reverses it and refuses a second
+restore.
+
+Both dispatch on an **explicit allowlist** of statically compiled statements — one `UPDATE` per
+supported type, no interpolated table name anywhere (AD-20). Four types are refused with their own
+messages:
+
+| Refused | Because |
+|---|---|
+| `prompt_version` | Append-only history; rule 6 depends on it having no UPDATE path |
+| `source_session` | Layer 1 evidence is written once; deleting it breaks provenance |
+| `ingestion_record` | An inbox item is archived, so the raw capture survives |
+| `context_snapshot` | Derived and regenerable (AD-8) |
+
+Both are `security invoker`, so a row in another workspace is invisible rather than merely
+unauthorised: the `UPDATE` matches nothing and the function raises.
 
 ---
 
