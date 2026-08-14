@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { annotate, comparisonKey, mergeAcrossChunks } from './merge';
 import {
@@ -112,13 +112,58 @@ describe('the deterministic provider', () => {
   });
 });
 
-describe('the Anthropic provider', () => {
-  it('reports itself unconfigured rather than returning nothing', async () => {
-    // A stub that returned an empty result would be indistinguishable from a
-    // source with nothing in it — the worst possible failure mode here.
+describe('the Anthropic provider — readiness, not operation', () => {
+  const env = { ...process.env };
+  afterEach(() => {
+    process.env.ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY;
+    process.env.CONTEXTSHELF_EXTRACTION_MODEL = env.CONTEXTSHELF_EXTRACTION_MODEL;
+  });
+
+  it('is unconfigured, and says which piece is missing', async () => {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.CONTEXTSHELF_EXTRACTION_MODEL;
     expect(anthropicProvider.isConfigured()).toBe(false);
     expect(anthropicProvider.configurationProblem()).toMatch(/ANTHROPIC_API_KEY/);
-    await expect(anthropicProvider.extract(request())).rejects.toThrow(/not connected/);
+    expect(anthropicProvider.configurationProblem()).toMatch(/CONTEXTSHELF_EXTRACTION_MODEL/);
+  });
+
+  it('hard-codes no model', () => {
+    // A default would be a claim that some model had been chosen and validated
+    // for this task. None has, so the identifier comes from the environment or
+    // it does not exist.
+    delete process.env.CONTEXTSHELF_EXTRACTION_MODEL;
+    expect(anthropicProvider.model).toBeNull();
+
+    process.env.CONTEXTSHELF_EXTRACTION_MODEL = 'some-model-id';
+    expect(anthropicProvider.model).toBe('some-model-id');
+  });
+
+  it('needs the model as well as the key before it will run', () => {
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-not-a-real-key';
+    delete process.env.CONTEXTSHELF_EXTRACTION_MODEL;
+    expect(anthropicProvider.isConfigured()).toBe(false);
+    expect(anthropicProvider.configurationProblem()).toMatch(/no model has been validated/);
+  });
+
+  it('refuses by name rather than returning an empty result', async () => {
+    // An empty result would be indistinguishable from a source containing
+    // nothing — the user would file nothing and believe there was nothing.
+    delete process.env.ANTHROPIC_API_KEY;
+    await expect(anthropicProvider.extract(request())).rejects.toThrow(/not configured/i);
+  });
+
+  it('makes no network call while unconfigured', async () => {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.CONTEXTSHELF_EXTRACTION_MODEL;
+    const spy = vi.spyOn(globalThis, 'fetch');
+    await anthropicProvider.extract(request()).catch(() => undefined);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('is never the default provider while unconfigured', () => {
+    delete process.env.ANTHROPIC_API_KEY;
+    expect(defaultProvider().id).toBe('deterministic');
   });
 
   it('declares that it would send content off the machine', () => {

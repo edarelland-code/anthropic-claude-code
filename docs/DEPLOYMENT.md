@@ -483,3 +483,40 @@ and tears everything down.
 | Signed in but "No workspace found" | Migration not applied | `npm run db:push` |
 | Everything empty after signing in on the second machine | Different email address | Check the address; the shelf is per-account |
 | Local `npm run dev` works, production does not | Env vars set locally only | Add them in Vercel, all three environments |
+
+
+---
+
+## Optional: AI-assisted extraction
+
+ContextShelf works fully without this. Deterministic extraction — the built-in provider — needs no
+credential, sends nothing anywhere, and powers the whole Analyze &amp; review workflow. Everything
+below is about the optional model-backed provider.
+
+Two server-side environment variables, both required to enable it:
+
+```
+ANTHROPIC_API_KEY=sk-ant-…        an Anthropic API key
+CONTEXTSHELF_EXTRACTION_MODEL=…   the model identifier to use
+```
+
+**There is no default model, deliberately.** A default in code would assert that some particular
+model had been chosen and validated for this task; none has been. With the key set and the model
+unset, the provider stays `Not configured` and says which piece is missing. Choose a current Claude
+model identifier from Anthropic's own published model list when you configure it.
+
+**There is no place in the app to paste the key**, and that is also deliberate. Storing a key per
+user would mean encrypting it at rest, which would mean a key-management dependency this deployment
+does not have. It lives in the Vercel production environment beside `SUPABASE_SECRET_KEY` — never
+behind a `NEXT_PUBLIC_` prefix, never in a table, never in git, never in a log, and never in any
+response.
+
+**What a request costs is not stated anywhere in this product.** ContextShelf records input and
+output token counts from the provider's own response and displays those. Turning tokens into money
+requires current published pricing for the model you configured, and a figure quoted from a stale
+rate would be worse than none.
+
+**When a request happens.** Only when a signed-in person presses *Extract suggestions*, and only
+after the credential-warning gate if the source looks like it contains secrets. Claude Code
+deliveries through `/api/ingest` never trigger one — that path cannot reach the extraction layer at
+all, which is asserted in `src/lib/extraction/readiness.test.ts` rather than left as an intention.
