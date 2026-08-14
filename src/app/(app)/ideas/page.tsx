@@ -1,7 +1,8 @@
 import Link from 'next/link';
 
+import { CreateFromSection } from '@/components/topics/create-from-section';
 import { getData } from '@/lib/data';
-import type { IdeaStatus } from '@/lib/domain/types';
+import type { IdeaStatus, Subtopic } from '@/lib/domain/types';
 import { cn, formatDate } from '@/lib/utils';
 
 export const dynamic = 'force-dynamic';
@@ -31,6 +32,13 @@ export default async function IdeasPage() {
   const workspace = await data.workspaces.getDefault();
   const topics = workspace ? await data.topics.list(workspace.id, { includeArchived: true }) : [];
 
+  // Subtopics for the picker. Every memory object belongs to a topic (rule 1),
+  // so the section-level create action chooses one before showing the form.
+  const subtopicsByTopic: Record<string, Subtopic[]> = {};
+  for (const t of topics) {
+    subtopicsByTopic[t.topic.id] = await data.subtopics.listForTopic(t.topic.id);
+  }
+
   const perTopic = await Promise.all(
     topics.map(async (t) => ({ topic: t.topic, ideas: await data.ideas.listForTopic(t.topic.id) })),
   );
@@ -44,6 +52,14 @@ export default async function IdeasPage() {
           Suggestions from any source, and what became of them. Rejected ideas stay, with the reason.
         </p>
       </header>
+
+      <div className="mt-5">
+        <CreateFromSection
+          topics={topics.map((t) => t.topic)}
+          subtopicsByTopic={subtopicsByTopic}
+          label="Idea"
+        />
+      </div>
 
       {all.length === 0 ? (
         <p className="mt-6 rounded-lg p-6 text-sm muted surface">

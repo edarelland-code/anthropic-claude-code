@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation';
 import { ArrowLeft, CircleAlert, Scale, Sparkles } from 'lucide-react';
 
 import { KnowledgeChip, Progress, SourceBadge, StatusPill } from '@/components/ui/badges';
+import { CreateMemoryActions } from '@/components/topics/create-forms';
 import { MasterMemory } from '@/components/topics/master-memory';
 import { getData } from '@/lib/data';
 import { assembleMemory } from '@/lib/resume/memory';
@@ -150,6 +151,16 @@ export default async function TopicPage({ params }: { params: Promise<{ topicId:
           </section>
 
           {/* Capture */}
+          <section className="rounded-lg p-4 surface">
+            <h2 className="text-sm font-semibold">Record</h2>
+            <p className="mt-1 text-xs muted">
+              A decision, an idea, or a prompt. One panel at a time.
+            </p>
+            <div className="mt-3">
+              <CreateMemoryActions topicId={topic.id} subtopics={subtopics} />
+            </div>
+          </section>
+
           <section className="rounded-lg p-4 surface">
             <h2 className="text-sm font-semibold">Add knowledge</h2>
             <p className="mt-1 text-sm muted">

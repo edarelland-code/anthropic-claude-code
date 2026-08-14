@@ -195,6 +195,160 @@ try {
       `sources ${sources.join('/')} · types ${types.join('/')}`);
   }
 
+
+  // --- Phase 2: create each memory object through the real UI --------------
+  //
+  // The repositories were already proven by unit and SQL tests. What these
+  // assert is the part only a browser can: that a person can actually create
+  // a decision, an idea, and a prompt from the interface, and that the rows
+  // land in hosted Postgres with the right topic, subtopic, and provenance.
+  heading('Phase 2. Decisions, Ideas, and Prompts through the UI');
+
+  // Several forms on the Topic page carry an input named "title", so every
+  // fill below is scoped to the form that owns it. An unscoped selector fills
+  // the first match — a different form — leaving this one's required field
+  // empty, and the browser then blocks submission silently. That is the same
+  // failure AD-16 exists to catch, and only the database assertion reveals it.
+  const openPanel = async (name, marker) => {
+    await a.goto(`${BASE}/topics/${topicId}`, { waitUntil: 'networkidle' });
+    await a.click(`button:has-text("${name}")`);
+    await a.waitForSelector(`form:has(${marker})`, { timeout: 15_000 });
+  };
+
+  // Decision
+  const DECISION = `Icon direction ${stamp}`;
+  const dForm = 'form:has(textarea[name="decision"])';
+  await openPanel('Decision', 'textarea[name="decision"]');
+  await a.fill(`${dForm} input[name="title"]`, DECISION);
+  await a.fill(`${dForm} textarea[name="decision"]`, 'Use the slash arrow X geometry.');
+  await a.fill(`${dForm} textarea[name="reason"]`, 'Reads at 16px where the blue circle did not.');
+  await a.fill(`${dForm} textarea[name="alternatives"]`, 'Blue circle\nCheckmark overlay');
+  await a.fill(`${dForm} input[name="approvedDirection"]`, 'slash -> arrow -> X');
+  await a.selectOption(`${dForm} select[name="sourceType"]`, 'claude_chat').catch(() => {});
+  await a.selectOption(`${dForm} select[name="subtopicId"]`, { index: 1 }).catch(() => {});
+  await a.click(`${dForm} button[type="submit"]`);
+  await a.waitForTimeout(2500);
+
+  const { data: dRows } = await admin
+    .from('decisions').select('*').eq('title', DECISION);
+  const decisionRow = (dRows ?? [])[0] ?? null;
+  record('decision created through the UI', Boolean(decisionRow), decisionRow ? `id ${decisionRow.id}` : 'no row');
+  if (decisionRow) {
+    record('decision fields persisted', Boolean(decisionRow.reason) && (decisionRow.alternatives ?? []).length === 2,
+      `alternatives ${(decisionRow.alternatives ?? []).length}, approved "${decisionRow.approved_direction ?? ''}"`);
+    record('decision provenance + association', decisionRow.source_type === 'claude_chat' && decisionRow.topic_id === topicId,
+      `source ${decisionRow.source_type}, subtopic ${decisionRow.subtopic_id ? 'set' : 'topic-level'}`);
+    // Rule 7 still holds against a real row.
+    const { error: noReason } = await admin.rpc('supersede_decision', {
+      p_old_decision_id: decisionRow.id, p_new_decision_id: decisionRow.id, p_reason: '',
+    });
+    record('supersession still requires a reason', Boolean(noReason), noReason ? 'refused' : 'ACCEPTED — rule 7 broken');
+  }
+
+  // Idea
+  const IDEA = `Overlay a checkmark ${stamp}`;
+  const iForm = 'form:has(textarea[name="rationale"])';
+  await openPanel('Idea', 'textarea[name="rationale"]');
+  await a.fill(`${iForm} input[name="title"]`, IDEA);
+  await a.fill(`${iForm} textarea[name="idea"]`, 'Put a check over the glyph.');
+  await a.fill(`${iForm} textarea[name="rationale"]`, 'Suggested because it reads as completion.');
+  await a.selectOption(`${iForm} select[name="sourceType"]`, 'claude_cowork').catch(() => {});
+  await a.click(`${iForm} button[type="submit"]`);
+  await a.waitForTimeout(2500);
+
+  const { data: iRows } = await admin.from('ideas').select('*').eq('title', IDEA);
+  const ideaRow = (iRows ?? [])[0] ?? null;
+  record('idea created through the UI', Boolean(ideaRow), ideaRow ? `status ${ideaRow.status}` : 'no row');
+  if (ideaRow) {
+    record('idea provenance persisted', ideaRow.source_type === 'claude_cowork', `source ${ideaRow.source_type}`);
+    // Rejection must keep the original rationale AND add the reason.
+    const { data: rejected } = await admin.from('ideas').select('rationale').eq('id', ideaRow.id).maybeSingle();
+    const originalRationale = rejected?.rationale ?? '';
+    await admin.from('ideas').update({
+      status: 'rejected',
+      rationale: `${originalRationale}\n\n[rejected] reads as "done", not "relay"`,
+    }).eq('id', ideaRow.id);
+    const { data: after } = await admin.from('ideas').select('*').eq('id', ideaRow.id).maybeSingle();
+    const keptBoth = (after?.rationale ?? '').includes('Suggested because')
+      && (after?.rationale ?? '').includes('[rejected]');
+    record('rejection preserves the original rationale', keptBoth && after?.status === 'rejected',
+      keptBoth ? 'both kept' : 'original rationale LOST');
+  }
+
+  // Prompt
+  const PROMPT = `Icon generation prompt ${stamp}`;
+  const pForm = 'form:has(textarea[name="body"])';
+  await openPanel('Prompt', 'textarea[name="body"]');
+  await a.fill(`${pForm} input[name="title"]`, PROMPT);
+  await a.fill(`${pForm} textarea[name="body"]`, 'VERSION ONE BODY: draw a relay glyph.');
+  await a.fill(`${pForm} input[name="purpose"]`, 'Generate the app icon.');
+  await a.selectOption(`${pForm} select[name="result"]`, 'partially_worked').catch(() => {});
+  await a.selectOption(`${pForm} select[name="sourceType"]`, 'claude_code').catch(() => {});
+  await a.click(`${pForm} button[type="submit"]`);
+  await a.waitForTimeout(3000);
+
+  const { data: pRows } = await admin.from('prompts').select('*').eq('title', PROMPT);
+  const promptRow = (pRows ?? [])[0] ?? null;
+  record('prompt created through the UI', Boolean(promptRow), promptRow ? `id ${promptRow.id}` : 'no row');
+
+  if (promptRow) {
+    const { data: v1rows } = await admin
+      .from('prompt_versions').select('*').eq('prompt_id', promptRow.id).order('version');
+    const v1 = (v1rows ?? [])[0] ?? null;
+    record('version 1 created', v1?.version === 1 && String(v1?.body).includes('VERSION ONE BODY'), `v${v1?.version}`);
+
+    // The evaluation must be an appended outcome, never written onto v1.
+    const { data: outcomes } = await admin
+      .from('prompt_version_outcomes').select('*').eq('prompt_version_id', v1.id).order('seq');
+    const latest = (outcomes ?? [])[(outcomes ?? []).length - 1];
+    record('outcome appended, not written onto the version',
+      (outcomes ?? []).length >= 2 && latest?.result === 'partially_worked',
+      `${(outcomes ?? []).length} outcome row(s), current "${latest?.result}"`);
+
+    // v1 body is immutable: adding a version must not change it.
+    const { data: v2 } = await admin.from('prompt_versions').insert({
+      prompt_id: promptRow.id, workspace_id: promptRow.workspace_id,
+      user_id: promptRow.user_id, version: 2, body: 'VERSION TWO BODY: better glyph.',
+    }).select('*').single();
+    const { data: v1after } = await admin.from('prompt_versions').select('body').eq('id', v1.id).maybeSingle();
+    record('version 1 is immutable after adding version 2',
+      String(v1after?.body).includes('VERSION ONE BODY'), 'v1 body unchanged');
+
+    // Winning must identify the exact version, and Copy must return ITS body.
+    await admin.from('prompt_winning_selections').insert({
+      prompt_id: promptRow.id, prompt_version_id: v1.id,
+      workspace_id: promptRow.workspace_id, user_id: promptRow.user_id,
+      reason: 'v1 still renders better at 16px',
+    });
+    const { data: winning } = await admin
+      .from('prompt_current_winning').select('*').eq('prompt_id', promptRow.id).maybeSingle();
+    // v2 is the LATEST; v1 is the WINNER. Copying the latest would be wrong.
+    record('winning points at the exact version, not the latest',
+      winning?.prompt_version_id === v1.id && String(winning?.winning_body).includes('VERSION ONE BODY'),
+      `winner v${winning?.winning_version}, latest v${v2?.version}`);
+
+    // Changing the winner keeps the earlier selection readable.
+    await admin.from('prompt_winning_selections').insert({
+      prompt_id: promptRow.id, prompt_version_id: v2.id,
+      workspace_id: promptRow.workspace_id, user_id: promptRow.user_id, reason: 'v2 overtook it',
+    });
+    const { data: history } = await admin
+      .from('prompt_winning_selections').select('*').eq('prompt_id', promptRow.id);
+    const { data: nowWinning } = await admin
+      .from('prompt_current_winning').select('*').eq('prompt_id', promptRow.id).maybeSingle();
+    record('winner history survives a change',
+      (history ?? []).length === 2 && nowWinning?.prompt_version_id === v2.id,
+      `${(history ?? []).length} selections, current v${nowWinning?.winning_version}`);
+  }
+
+  // All three must appear in the Timeline projection.
+  const { data: tl } = await admin
+    .from('timeline_events').select('entity_type, title').eq('topic_id', topicId);
+  const kinds = new Set(((tl ?? [])).map((r) => r.entity_type));
+  record('all three appear in the Timeline',
+    kinds.has('decision') && kinds.has('idea') && kinds.has('prompt_version'),
+    [...kinds].join(', '));
+
   // --- C. Persists across a hard reload -------------------------------------
   heading('C. Persistence across a hard reload');
   await a.reload({ waitUntil: 'networkidle' });

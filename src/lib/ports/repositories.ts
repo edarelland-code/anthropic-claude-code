@@ -14,6 +14,7 @@ import type {
   EntityType,
   FileReference,
   Idea,
+  IdeaStatus,
   IngestionRecord,
   KnowledgeEntry,
   KnowledgeType,
@@ -208,10 +209,21 @@ export interface IdeaRepository {
     title: string;
     idea?: string | null;
     rationale?: string | null;
+    /** Where in the lifecycle it starts. Defaults to `suggested`. */
+    status?: IdeaStatus;
     sourceType?: SourceType;
     sourceSessionId?: string | null;
   }): Promise<Idea>;
-  setStatus(id: string, status: Idea['status'], note?: string): Promise<Idea>;
+  getById(id: string): Promise<Idea | null>;
+  /**
+   * Moves an idea through its lifecycle. `note` is APPENDED to the rationale,
+   * never substituted for it — a rejected idea has to keep both why it was
+   * suggested and why it was turned down, or the avoid-list loses half its
+   * value (rule 9).
+   */
+  setStatus(id: string, status: IdeaStatus, note?: string): Promise<Idea>;
+  /** Records that an idea became a decision, without copying either into the other. */
+  linkDecision(ideaId: string, decisionId: string | null): Promise<Idea>;
 }
 
 export interface PromptRepository {
