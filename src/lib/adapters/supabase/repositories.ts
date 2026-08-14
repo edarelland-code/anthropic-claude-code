@@ -1313,12 +1313,79 @@ class SupabasePrompts implements PromptRepository {
     });
   }
 
-  async markWinning(promptId: string, isWinning: boolean): Promise<void> {
-    const { error } = await this.db
+  /**
+   * Designates one version as the winner, or clears the designation.
+   *
+   * Winning belongs to a version, not a prompt: "which prompt text produced the
+   * best result" is unanswerable at prompt level once there is more than one
+   * version. Selections append, so an earlier winner stays readable, and
+   * `prompts.is_winning` is kept in step by a trigger — derived, never written
+   * here (migration 0002 §5).
+   */
+  async markWinning(input: {
+    promptId: string;
+    versionId: string | null;
+    reason?: string | null;
+  }): Promise<void> {
+    const { data: userData } = await this.db.auth.getUser();
+    if (!userData.user) throw new Error('not signed in');
+    const { data: promptRow, error: promptErr } = await this.db
       .from('prompts')
-      .update({ is_winning: isWinning })
-      .eq('id', promptId);
+      .select('workspace_id')
+      .eq('id', input.promptId)
+      .single();
+    if (promptErr) throw new Error(`mark winning prompt: ${promptErr.message}`);
+
+    const { error } = await this.db.from('prompt_winning_selections').insert({
+      prompt_id: input.promptId,
+      prompt_version_id: input.versionId,
+      workspace_id: (promptRow as Row).workspace_id,
+      user_id: userData.user.id,
+      reason: input.reason ?? null,
+    });
     if (error) throw new Error(`mark winning prompt: ${error.message}`);
+  }
+
+  /** The winning version and its exact body — what "Copy Winning Prompt" copies. */
+  async getWinning(promptId: string): Promise<{
+    versionId: string;
+    version: number;
+    body: string;
+    reason: string | null;
+    selectedAt: string;
+  } | null> {
+    const { data, error } = await this.db
+      .from('prompt_current_winning')
+      .select('*')
+      .eq('prompt_id', promptId)
+      .maybeSingle();
+    if (error) throw new Error(`get winning prompt: ${error.message}`);
+    if (!data) return null;
+    const row = data as Row;
+    return {
+      versionId: String(row.prompt_version_id),
+      version: Number(row.winning_version),
+      body: String(row.winning_body ?? ''),
+      reason: (row.reason as string | null) ?? null,
+      selectedAt: String(row.selected_at),
+    };
+  }
+
+  /** Every winning designation this prompt has had, newest first. */
+  async winningHistory(promptId: string): Promise<
+    Array<{ versionId: string | null; reason: string | null; createdAt: string }>
+  > {
+    const { data, error } = await this.db
+      .from('prompt_winning_selections')
+      .select('prompt_version_id, reason, created_at, seq')
+      .eq('prompt_id', promptId)
+      .order('seq', { ascending: false });
+    if (error) throw new Error(`winning history: ${error.message}`);
+    return ((data ?? []) as Row[]).map((r) => ({
+      versionId: (r.prompt_version_id as string | null) ?? null,
+      reason: (r.reason as string | null) ?? null,
+      createdAt: String(r.created_at),
+    }));
   }
 }
 

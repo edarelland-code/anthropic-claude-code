@@ -13,8 +13,9 @@
 --   2. supersede_decision() — transactional, reason mandatory
 --   3. A CHECK so a superseded decision cannot exist without its reason
 --   4. prompt_version_outcomes — append-only ratings, so rule 6 stands
---   5. timeline_events — a security_invoker view over eight record types
---   6. Indexes for timeline ordering
+--   5. prompt_winning_selections — which exact version won, append-only
+--   6. timeline_events — a security_invoker view over eight record types
+--   7. Indexes for timeline ordering
 --
 -- Safe to run against a database holding production data. Every statement is
 -- guarded (IF NOT EXISTS / CREATE OR REPLACE) so re-running is a no-op.
@@ -256,7 +257,129 @@ grant select on prompt_version_current_outcome to authenticated, service_role;
 revoke all on prompt_version_current_outcome from anon;
 
 -- ---------------------------------------------------------------------------
--- 5. timeline_events
+-- 5. prompt_winning_selections — which exact version won
+--
+-- prompts.is_winning marks a prompt, which cannot answer "which prompt text
+-- produced the best result" once a prompt has several versions. The winner is a
+-- property of a version, and which version is winning changes over time.
+--
+-- Same shape as outcomes, for the same reasons: append-only, ordered by an
+-- identity sequence rather than a timestamp, newest row wins. Changing the
+-- winner appends; the earlier selection stays readable, so "we used to think v2
+-- was best, then v4 beat it" is recoverable. A row with a null
+-- prompt_version_id records that a prompt no longer has a winner, so clearing
+-- is history too rather than a silent gap.
+--
+-- Source of truth: the highest-seq row here, exposed as
+-- prompt_current_winning. prompts.is_winning is kept in step by a trigger and
+-- is strictly derived — never written directly, and safe to read only as
+-- "does this prompt have a winner".
+-- ---------------------------------------------------------------------------
+
+create table if not exists prompt_winning_selections (
+  id                 uuid primary key default gen_random_uuid(),
+  seq                bigint generated always as identity,
+  prompt_id          uuid not null,
+  -- Null means "cleared": the prompt has no winning version from here on.
+  prompt_version_id  uuid,
+  workspace_id       uuid not null references workspaces(id) on delete cascade,
+  user_id            uuid references auth.users(id) on delete set null,
+  reason             text,
+  created_at         timestamptz not null default now(),
+  constraint prompt_winning_selections_prompt_fk
+    foreign key (prompt_id, workspace_id)
+    references prompts (id, workspace_id) on delete cascade,
+  constraint prompt_winning_selections_version_fk
+    foreign key (prompt_version_id, workspace_id)
+    references prompt_versions (id, workspace_id) on delete cascade
+);
+
+create index if not exists prompt_winning_selections_prompt_idx
+  on prompt_winning_selections (prompt_id, seq desc);
+create index if not exists prompt_winning_selections_workspace_idx
+  on prompt_winning_selections (workspace_id, seq desc);
+
+/** A winning version must belong to the prompt it is declared to win. */
+create or replace function prompt_winning_selection_valid()
+returns trigger language plpgsql as $$
+begin
+  if new.prompt_version_id is not null then
+    if not exists (
+      select 1 from prompt_versions v
+      where v.id = new.prompt_version_id and v.prompt_id = new.prompt_id
+    ) then
+      raise exception 'version % does not belong to prompt %', new.prompt_version_id, new.prompt_id;
+    end if;
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists prompt_winning_selection_valid_trg on prompt_winning_selections;
+create trigger prompt_winning_selection_valid_trg
+  before insert on prompt_winning_selections
+  for each row execute function prompt_winning_selection_valid();
+
+/**
+ * Keeps prompts.is_winning derived rather than independently written.
+ *
+ * Without this the column would drift from the selections table and the two
+ * would disagree about the same fact.
+ */
+create or replace function prompt_winning_sync()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  update prompts
+     set is_winning = (new.prompt_version_id is not null)
+   where id = new.prompt_id;
+  return new;
+end $$;
+
+drop trigger if exists prompt_winning_sync_trg on prompt_winning_selections;
+create trigger prompt_winning_sync_trg
+  after insert on prompt_winning_selections
+  for each row execute function prompt_winning_sync();
+
+alter table prompt_winning_selections enable row level security;
+
+do $$
+begin
+  if not exists (select 1 from pg_policies where tablename='prompt_winning_selections' and policyname='prompt_winning_selections_read') then
+    create policy prompt_winning_selections_read on prompt_winning_selections
+      for select using (is_workspace_member(workspace_id));
+  end if;
+  if not exists (select 1 from pg_policies where tablename='prompt_winning_selections' and policyname='prompt_winning_selections_insert') then
+    create policy prompt_winning_selections_insert on prompt_winning_selections
+      for insert with check (is_workspace_member(workspace_id));
+  end if;
+end $$;
+
+grant select, insert on prompt_winning_selections to authenticated, service_role;
+revoke update, delete on prompt_winning_selections from authenticated, service_role;
+revoke all on prompt_winning_selections from anon;
+
+/** The current winning version of every prompt, with its body. */
+create or replace view prompt_current_winning with (security_invoker = true) as
+  select
+    w.prompt_id,
+    w.workspace_id,
+    w.prompt_version_id,
+    v.version        as winning_version,
+    v.body           as winning_body,
+    w.reason,
+    w.created_at     as selected_at
+  from (
+    select distinct on (s.prompt_id) s.*
+    from prompt_winning_selections s
+    order by s.prompt_id, s.seq desc
+  ) w
+  left join prompt_versions v on v.id = w.prompt_version_id
+  where w.prompt_version_id is not null;
+
+grant select on prompt_current_winning to authenticated, service_role;
+revoke all on prompt_current_winning from anon;
+
+-- ---------------------------------------------------------------------------
+-- 6. timeline_events
 --
 -- The Timeline is a projection, never a store. A materialised copy would be a
 -- second source of truth and would drift from the rows it summarises; this view
@@ -344,7 +467,7 @@ create or replace view timeline_events with (security_invoker = true) as
     pv.id, pv.workspace_id, p.topic_id,
     case when p.subtopic_id is null then '{}'::uuid[] else array[p.subtopic_id] end,
     'prompt_version'::entity_type,
-    case when p.is_winning and p.current_version_id = pv.id then 'winning_prompt' else 'prompt' end,
+    case when cw.prompt_version_id = pv.id then 'winning_prompt' else 'prompt' end,
     p.title || ' (v' || pv.version || ')',
     coalesce(o.output_summary, pv.output_summary, o.notes, pv.notes, left(pv.body, 280)),
     p.source_type,
@@ -355,6 +478,7 @@ create or replace view timeline_events with (security_invoker = true) as
   from prompt_versions pv
   join prompts p on p.id = pv.prompt_id
   left join prompt_version_current_outcome o on o.prompt_version_id = pv.id
+  left join prompt_current_winning cw on cw.prompt_id = p.id
   where p.deleted_at is null
 
   union all
@@ -436,7 +560,7 @@ grant select on timeline_events to authenticated, service_role;
 revoke all on timeline_events from anon;
 
 -- ---------------------------------------------------------------------------
--- 6. Indexes for the projection
+-- 7. Indexes for the projection
 --
 -- knowledge_entries, decisions, and source_sessions already carry the
 -- topic-scoped ordering indexes they need. These fill the gaps, and add the

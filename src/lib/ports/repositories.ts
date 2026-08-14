@@ -241,7 +241,25 @@ export interface PromptRepository {
     notes?: string | null;
     outputSummary?: string | null;
   }): Promise<PromptVersion>;
-  markWinning(promptId: string, isWinning: boolean): Promise<void>;
+  /**
+   * Designates the exact winning version, or clears it with `versionId: null`.
+   *
+   * Source of truth is the append-only selection history; `prompts.is_winning`
+   * is derived from it by a trigger and must never be written directly.
+   */
+  markWinning(input: { promptId: string; versionId: string | null; reason?: string | null }): Promise<void>;
+  /** The winning version and its exact body — what "Copy Winning Prompt" copies. */
+  getWinning(promptId: string): Promise<{
+    versionId: string;
+    version: number;
+    body: string;
+    reason: string | null;
+    selectedAt: string;
+  } | null>;
+  /** Every winning designation this prompt has had, newest first. */
+  winningHistory(promptId: string): Promise<
+    Array<{ versionId: string | null; reason: string | null; createdAt: string }>
+  >;
 }
 
 export interface ActionRepository {

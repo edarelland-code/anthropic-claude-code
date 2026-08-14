@@ -51,11 +51,14 @@ begin
   values (a_ws, a_topic, a_id, 'Add a checkmark', 'Overlay a check', 'rejected')
   returning id into a_idea;
 
-  insert into prompts (workspace_id, topic_id, user_id, title, is_winning)
-  values (a_ws, a_topic, a_id, 'Icon prompt', true) returning id into a_prompt;
+  insert into prompts (workspace_id, topic_id, user_id, title)
+  values (a_ws, a_topic, a_id, 'Icon prompt') returning id into a_prompt;
   insert into prompt_versions (prompt_id, workspace_id, user_id, version, body, result)
   values (a_prompt, a_ws, a_id, 1, 'secret prompt body', 'worked') returning id into a_version;
   update prompts set current_version_id = a_version where id = a_prompt;
+  -- Winning is a property of a version, declared by a selection row.
+  insert into prompt_winning_selections (prompt_id, prompt_version_id, workspace_id, user_id, reason)
+  values (a_prompt, a_version, a_ws, a_id, 'first version that worked');
 
   insert into actions (workspace_id, topic_id, user_id, kind, title)
   values (a_ws, a_topic, a_id, 'blocker', 'Waiting on brand sign-off') returning id into a_action;
@@ -100,7 +103,12 @@ begin
   -- --- 4. The winning prompt is labelled as such --------------------------
   perform t.assert(
     exists (select 1 from timeline_events where id = a_version and kind = 'winning_prompt'),
-    'the current version of a winning prompt is not labelled winning_prompt'
+    'the winning version is not labelled winning_prompt in the timeline'
+  );
+  -- The derived flag on the prompt agrees with the selection.
+  perform t.assert(
+    (select is_winning from prompts where id = a_prompt),
+    'prompts.is_winning was not synced from the winning selection'
   );
 
   -- --- 5. Soft-deleted rows leave the projection --------------------------
@@ -266,7 +274,82 @@ begin
   perform t.assert(n = 0, 'LEAK: user B reads user A''s outcomes through the view');
   perform t.login(a_id);
 
-  raise notice 'Timeline: all record types project, ordering holds, soft deletes drop out, and user B sees none of user A''s rows through the view. Decision supersession preserves both sides and requires a reason. Prompt outcomes append, latest wins, bodies stay immutable, and neither leaks.';
+  -- --- 11. Winning is per version, and its history survives --------------
+  declare
+    a_version2 uuid;
+  begin
+    insert into prompt_versions (prompt_id, workspace_id, user_id, version, body)
+    values (a_prompt, a_ws, a_id, 2, 'a much better prompt body') returning id into a_version2;
+
+    -- A version from another prompt cannot be declared this prompt's winner.
+    blocked := false;
+    begin
+      insert into prompt_winning_selections (prompt_id, prompt_version_id, workspace_id, user_id)
+      values (a_prompt, a_entry, a_ws, a_id);
+    exception when others then blocked := true;
+    end;
+    perform t.assert(blocked, 'a version from another prompt was accepted as the winner');
+
+    insert into prompt_winning_selections (prompt_id, prompt_version_id, workspace_id, user_id, reason)
+    values (a_prompt, a_version2, a_ws, a_id, 'v2 beat v1 on the 16px render');
+
+    perform t.assert(
+      (select prompt_version_id from prompt_current_winning where prompt_id = a_prompt) = a_version2,
+      'the newest winning selection is not current'
+    );
+    perform t.assert(
+      (select winning_body from prompt_current_winning where prompt_id = a_prompt)
+        = 'a much better prompt body',
+      'the winning body is not the winning version''s body'
+    );
+
+    -- The earlier selection is still readable: "we used to think v1 won".
+    select count(*) into n from prompt_winning_selections where prompt_id = a_prompt;
+    perform t.assert(n = 2, format('expected 2 winning selections in history, found %s', n));
+
+    -- Only the winning version carries the label.
+    perform t.assert(
+      exists (select 1 from timeline_events where id = a_version2 and kind = 'winning_prompt'),
+      'v2 is not labelled winning after being selected'
+    );
+    perform t.assert(
+      exists (select 1 from timeline_events where id = a_version and kind = 'prompt'),
+      'v1 still claims to be winning after v2 replaced it'
+    );
+
+    -- Clearing is recorded, not silent.
+    insert into prompt_winning_selections (prompt_id, prompt_version_id, workspace_id, user_id, reason)
+    values (a_prompt, null, a_ws, a_id, 'neither version holds up any more');
+    perform t.assert(
+      not exists (select 1 from prompt_current_winning where prompt_id = a_prompt),
+      'clearing the winner did not take effect'
+    );
+    perform t.assert(
+      not (select is_winning from prompts where id = a_prompt),
+      'prompts.is_winning was not synced when the winner was cleared'
+    );
+    select count(*) into n from prompt_winning_selections where prompt_id = a_prompt;
+    perform t.assert(n = 3, 'clearing did not append to the selection history');
+
+    -- Append-only, like the other history tables.
+    blocked := false;
+    begin
+      update prompt_winning_selections set reason = 'x' where prompt_id = a_prompt;
+      blocked := not found;
+    exception when others then blocked := true;
+    end;
+    perform t.assert(blocked, 'a winning selection was updated');
+
+    -- And it does not leak.
+    perform t.login(b_id);
+    select count(*) into n from prompt_winning_selections;
+    perform t.assert(n = 0, format('LEAK: user B sees %s winning selections', n));
+    select count(*) into n from prompt_current_winning;
+    perform t.assert(n = 0, 'LEAK: user B reads winning selections through the view');
+    perform t.login(a_id);
+  end;
+
+  raise notice 'Timeline: all record types project, ordering holds, soft deletes drop out, and user B sees none of user A''s rows through the view. Decision supersession preserves both sides and requires a reason. Prompt outcomes append, latest wins, bodies stay immutable. Winning is per version, its history survives, and none of it leaks.';
 end $$;
 
 rollback;
