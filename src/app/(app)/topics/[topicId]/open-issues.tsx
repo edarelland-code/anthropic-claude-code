@@ -57,7 +57,7 @@ export function OpenIssues({ topicId, actions }: { topicId: string; actions: Act
                 onClick={() => startResolve(() => void resolveActionAction(a.id, topicId))}
                 aria-label={`Resolve: ${a.title}`}
                 title="Mark done"
-                className="shrink-0 rounded p-1 muted hover:bg-black/[0.06] disabled:opacity-50 dark:hover:bg-white/[0.08]"
+                className="inline-flex size-11 shrink-0 items-center justify-center rounded muted hover:bg-black/[0.06] disabled:opacity-50 dark:hover:bg-white/[0.08]"
               >
                 <Check className="size-4" aria-hidden />
               </button>

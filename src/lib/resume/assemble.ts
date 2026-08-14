@@ -102,6 +102,7 @@ const SECTION_ORDER = [
   'currentState',
   'nextAction',
   'activeDecisions',
+  'pendingDecisions',
   'requirements',
   'completedWork',
   'recentChanges',
@@ -122,6 +123,7 @@ const DENSITY_SECTIONS: Record<ResumeOptions['density'], readonly string[]> = {
     'currentState',
     'nextAction',
     'activeDecisions',
+    'pendingDecisions',
     'requirements',
     'recentChanges',
     'winningPrompts',
@@ -134,6 +136,7 @@ const DENSITY_SECTIONS: Record<ResumeOptions['density'], readonly string[]> = {
     'currentState',
     'nextAction',
     'activeDecisions',
+    'pendingDecisions',
     'requirements',
     'completedWork',
     'recentChanges',
@@ -222,11 +225,23 @@ export function assembleResumeContext(
     .sort((a, b) => (a.decidedAt < b.decidedAt ? 1 : -1))
     .slice(0, caps.decisions);
 
+  // `proposed` is neither. It is excluded from history explicitly rather than
+  // by omission, because a decision waiting for review is not a decision that
+  // was reached and later changed — and the two must not read alike.
   const historicalDecisions = caps.includeHistoricalDecisions
     ? decisions
-        .filter((d) => !(d.status === 'active' && d.supersededById === null))
+        .filter(
+          (d) => d.status !== 'proposed' && !(d.status === 'active' && d.supersededById === null),
+        )
         .sort((a, b) => (a.decidedAt < b.decidedAt ? 1 : -1))
     : [];
+
+  // Shown at every density, and uncapped. A proposal that a fresh session
+  // never sees is a proposal that silently never happens — and this is the one
+  // section whose whole purpose is to reach a person.
+  const pendingDecisions = decisions
+    .filter((d) => d.status === 'proposed' && d.supersededById === null)
+    .sort((a, b) => (a.decidedAt < b.decidedAt ? 1 : -1));
 
   const open = actions.filter(openAction);
   const nextAction = selectImmediateNextAction(open);
@@ -321,6 +336,7 @@ export function assembleResumeContext(
     },
     activeDecisions,
     historicalDecisions,
+    pendingDecisions,
     requirements,
     constraints,
     completedWork,

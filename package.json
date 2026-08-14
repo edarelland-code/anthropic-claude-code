@@ -16,6 +16,7 @@
     "db:types": "supabase gen types typescript --linked > src/lib/adapters/supabase/database.types.ts",
     "test:db": "bash scripts/db-test.sh",
     "test:responsive": "node scripts/responsive-qa.mjs",
+    "contextshelf:sync": "node scripts/contextshelf-sync.mjs",
     "provision": "node scripts/provision.mjs",
     "validate:hosted": "node scripts/validate-hosted.mjs",
     "schema:parity": "node scripts/schema-parity.mjs",

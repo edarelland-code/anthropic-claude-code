@@ -3,6 +3,7 @@ import { Check, Cloud, Database, Minus, Trash2 } from 'lucide-react';
 import { getData } from '@/lib/data';
 import { formatDate } from '@/lib/utils';
 
+import { ClaudeCodeConnection } from './claude-code-connection';
 import { RestoreButton } from './restore-button';
 import { SignOutButton } from './sign-out-button';
 
@@ -20,6 +21,12 @@ export default async function SettingsPage() {
   // history of deletions rather than a queue that empties.
   const deleted = workspace ? await data.recycle.list(workspace.id, true) : [];
   const recoverable = deleted.filter((d) => d.restoredAt === null);
+
+  const tokens = workspace ? await data.tokens.list(workspace.id) : [];
+  const topics = workspace ? await data.topics.list(workspace.id) : [];
+  // The endpoint's own origin, so the setup block a user copies points at the
+  // deployment they are actually looking at rather than at a hard-coded host.
+  const baseUrl = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://contextshelf.vercel.app';
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-6 sm:px-6 lg:py-8">
@@ -54,11 +61,17 @@ export default async function SettingsPage() {
           <Capability done label="Soft delete with a recoverable tombstone" />
           <Capability done label="Structured JSON import with a preview" />
           <Capability done label="Full-text search across every record type" />
-          <Capability label="JSON export" phase={4} />
-          <Capability label="File uploads to an object store" phase={5} />
-          <Capability label="Ingestion tokens for Claude Code" phase={5} />
+          <Capability done label="Ingestion tokens for Claude Code, with idempotent delivery" />
+          <Capability label="JSON export" phase={6} />
+          <Capability label="File uploads to an object store" phase={6} />
         </ul>
       </section>
+
+      <ClaudeCodeConnection
+        tokens={tokens}
+        topics={topics.map((t) => ({ id: t.topic.id, name: t.topic.name }))}
+        baseUrl={baseUrl}
+      />
 
       {/*
         Recovery.

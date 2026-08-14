@@ -91,7 +91,7 @@ export async function generateResume(input: {
         topic: ctx.topic,
         subtopics: ctx.subtopics,
         entries: ctx.timeline,
-        decisions: [...ctx.activeDecisions, ...ctx.supersededDecisions],
+        decisions: [...ctx.activeDecisions, ...ctx.pendingDecisions, ...ctx.supersededDecisions],
         ideas: ctx.rejectedIdeas,
         actions: ctx.openActions,
         files: ctx.files,

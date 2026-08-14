@@ -101,6 +101,41 @@ export const urlAdapter: IngestionAdapter<string> = {
   },
 };
 
+/**
+ * Layer 1 for a session that has work but no conversation.
+ *
+ * A Claude Code delivery is often a commit and a test run with no transcript
+ * worth keeping. Layer 1 still has to hold *something* verbatim, or the
+ * entries below it would point at nothing (rule 10) — so what the session
+ * actually stated is rendered, and nothing is invented beyond it.
+ */
+function renderWorkSummary(session: ClaudeSessionImport): string {
+  const lines: string[] = [];
+  const c = session.code;
+  if (c?.repoUrl) lines.push(`Repository: ${c.repoUrl}`);
+  if (c?.branch) lines.push(`Branch: ${c.branch}`);
+  if (c?.commitSha) lines.push(`Commit: ${c.commitSha}`);
+  if (c?.buildStatus) lines.push(`Build: ${c.buildStatus}`);
+  if (c?.testSummary) lines.push(`Tests: ${c.testSummary}`);
+  for (const [label, files] of [
+    ['Changed', c?.filesChanged],
+    ['Added', c?.filesAdded],
+    ['Removed', c?.filesRemoved],
+  ] as const) {
+    if (files?.length) lines.push(`${label}: ${files.join(', ')}`);
+  }
+  for (const a of session.work?.completedActions ?? []) {
+    lines.push(`Completed: ${a.title ?? a.id}`);
+  }
+  for (const a of session.work?.nextActions ?? []) {
+    lines.push(`Next: ${a.title}`);
+  }
+  for (const d of session.work?.proposedDecisions ?? []) {
+    lines.push(`Proposed decision: ${d.title} — ${d.decision}`);
+  }
+  return lines.join('\n');
+}
+
 function renderTranscript(session: ClaudeSessionImport): string {
   if (!session.messages || session.messages.length === 0) return '';
   return session.messages
@@ -182,9 +217,11 @@ export const claudeSessionJsonAdapter: IngestionAdapter<string> = {
       title: session.title,
       occurredAt: session.occurredAt,
       externalUrl: session.externalUrl,
-      raw: transcript || JSON.stringify(parsed, null, 2),
+      raw: transcript || renderWorkSummary(session) || JSON.stringify(parsed, null, 2),
       segments,
       code: session.code,
+      work: session.work,
+      target: session.target,
       hints: session.hints,
       payload: parsed as Record<string, unknown>,
       warnings,

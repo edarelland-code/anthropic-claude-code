@@ -13,13 +13,14 @@ with expected_tables(name) as (
          ('knowledge_entry_versions'),('decisions'),('ideas'),('prompts'),('prompt_versions'),
          ('file_references'),('actions'),('milestones'),('relationships'),('tags'),
          ('taggables'),('context_snapshots'),('ingestion_records'),('ingestion_tokens'),
-         ('deletion_log'),('prompt_version_outcomes'),('prompt_winning_selections')
+         ('deletion_log'),('prompt_version_outcomes'),('prompt_winning_selections'),
+         ('ingestion_deliveries')
 ),
 checks as (
 
   select 1 as ord, 'tables present' as check_name,
-         count(*)::text || ' / 26' as result,
-         case when count(*) = 26 then 'PASS' else 'FAIL: missing ' ||
+         count(*)::text || ' / 27' as result,
+         case when count(*) = 27 then 'PASS' else 'FAIL: missing ' ||
            coalesce((select string_agg(e.name, ', ') from expected_tables e
                      where not exists (select 1 from pg_tables p
                                        where p.schemaname='public' and p.tablename=e.name)), '?')
@@ -271,5 +272,64 @@ checks as (
               then 'PASS' else 'FAIL' end
   from information_schema.role_table_grants
   where table_schema='public' and table_name='search_documents'
+
+  union all
+  select 27, 'Phase 5 ingestion functions',
+         count(*)::text || ' / 2',
+         case when count(*) = 2 then 'PASS' else 'FAIL' end
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname = 'public' and p.proname in ('ingest_from_token', 'assert_ingest_work_allowed')
+
+  union all
+  -- The whole authorization boundary for the endpoint. `authenticated`
+  -- holding EXECUTE would mean any signed-in user could ingest as anyone
+  -- whose token hash they had obtained.
+  select 28, 'only the server may call ingest_from_token',
+         coalesce(nullif(concat_ws(', ',
+           case when has_function_privilege('anon', p.oid, 'execute') then 'anon' end,
+           case when has_function_privilege('authenticated', p.oid, 'execute') then 'authenticated' end,
+           case when has_function_privilege('service_role', p.oid, 'execute') then 'service_role' end
+         ), ''), '(nobody)'),
+         case when not has_function_privilege('anon', p.oid, 'execute')
+               and not has_function_privilege('authenticated', p.oid, 'execute')
+               and has_function_privilege('service_role', p.oid, 'execute')
+              then 'PASS' else 'FAIL' end
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname = 'public' and p.proname = 'ingest_from_token'
+
+  union all
+  -- One delivery per key per token, enforced by the database rather than by
+  -- the endpoint remembering to check.
+  select 29, 'one Idempotency-Key per token, enforced by an index',
+         coalesce(string_agg(indexname, ', '), '(none)'),
+         case when count(*) = 1 then 'PASS' else 'FAIL' end
+  from pg_indexes
+  where schemaname = 'public' and tablename = 'ingestion_deliveries' and indexdef like '%UNIQUE%'
+    and indexdef like '%token_id%' and indexdef like '%idempotency_key%'
+
+  union all
+  -- Token scope is composite (AD-11). A plain FK to topics(id) would let a
+  -- token in workspace B default to a topic in workspace A.
+  select 30, 'token scope foreign keys are composite',
+         count(*)::text || ' / 2',
+         case when count(*) = 2 then 'PASS' else 'FAIL' end
+  from pg_constraint
+  where conname in ('ingestion_tokens_scope_topic_fk', 'ingestion_tokens_scope_subtopic_fk')
+    and array_length(conkey, 1) = 2
+
+  union all
+  select 31, 'the session records build and test state',
+         count(*)::text || ' / 3',
+         case when count(*) = 3 then 'PASS' else 'FAIL' end
+  from information_schema.columns
+  where table_schema = 'public' and table_name = 'source_sessions'
+    and column_name in ('build_status', 'test_summary', 'artifacts')
+
+  union all
+  select 32, 'the delivery ledger is workspace-scoped',
+         coalesce(string_agg(policyname, ', '), '(no policy)'),
+         case when count(*) >= 1 then 'PASS' else 'FAIL' end
+  from pg_policies
+  where schemaname = 'public' and tablename = 'ingestion_deliveries'
 )
 select check_name, result, verdict from checks order by ord;

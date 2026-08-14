@@ -48,7 +48,7 @@ export default async function TopicPage({ params }: { params: Promise<{ topicId:
     topic,
     subtopics,
     entries: timeline,
-    decisions: [...ctx.activeDecisions, ...ctx.supersededDecisions],
+    decisions: [...ctx.activeDecisions, ...ctx.pendingDecisions, ...ctx.supersededDecisions],
     ideas: ctx.rejectedIdeas,
     prompts: promptsWithWinners,
     actions: openActions,
@@ -164,6 +164,45 @@ export default async function TopicPage({ params }: { params: Promise<{ topicId:
                 </div>
               )}
             </section>
+
+            {/*
+              The review gate.
+
+              A Claude Code delivery can put a decision here and can do nothing
+              else with it. Approving is a person setting the status to Active
+              through the same control every other decision uses — there is no
+              separate "accept" write path, which is what stops an automated
+              source from ever reaching one.
+            */}
+            {ctx.pendingDecisions.length > 0 && (
+              <section className="rounded-lg p-4 surface sm:col-span-2">
+                <h2 className="flex items-center gap-2 text-sm font-semibold">
+                  <Scale className="size-4 muted" aria-hidden />
+                  Proposed decisions — awaiting your review
+                  <span className="ml-auto text-xs muted">{ctx.pendingDecisions.length}</span>
+                </h2>
+                <p className="mt-1 text-xs leading-5 muted">
+                  These were suggested, not decided. They are not in force, they do not appear as
+                  current anywhere, and a Resume tells a fresh session not to build on them. Set one
+                  to Active to approve it, or Rejected to turn it down.
+                </p>
+                <ul className="mt-3 space-y-2.5">
+                  {ctx.pendingDecisions.map((d) => (
+                    <li key={d.id} id={d.id} className="border-l-2 border-amber-500 pl-2.5">
+                      <p className="text-sm font-medium">{d.title}</p>
+                      <p className="mt-0.5 text-sm leading-5">{d.decision}</p>
+                      {d.reason && <p className="mt-0.5 text-sm leading-5 muted">{d.reason}</p>}
+                      <p className="mt-0.5 text-[11px] muted">
+                        {d.sourceType === 'claude_code'
+                          ? 'Proposed by a Claude Code session.'
+                          : 'Proposed.'}
+                      </p>
+                      <DecisionControls decision={d} topicId={topic.id} />
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
 
             <OpenIssues topicId={topic.id} actions={openActions} />
           </div>

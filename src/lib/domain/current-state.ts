@@ -50,7 +50,15 @@ export function avoidList(input: {
   }
 
   for (const decision of input.decisions) {
-    if (decision.status !== 'active') {
+    // `proposed` is excluded, and the exclusion is load-bearing rather than
+    // tidy. "Not active" used to be a safe stand-in for "was decided and is no
+    // longer", because every decision had been decided by somebody. Since
+    // Phase 5 a Claude Code delivery can create one that was never decided at
+    // all — and putting that on the avoid list would tell the next session
+    // that a direction nobody has even reviewed was "evaluated and set aside".
+    // It would refuse to do something that was never turned down, which is the
+    // avoid list's own failure mode pointed the wrong way.
+    if (decision.status !== 'active' && decision.status !== 'proposed') {
       items.push({
         title: decision.title,
         reason: decision.supersedeReason ?? decision.reason,

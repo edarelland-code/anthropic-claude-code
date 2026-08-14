@@ -10,7 +10,9 @@ import type {
   EntityType,
   FileReference,
   Idea,
+  IngestReceipt,
   IngestionRecord,
+  IngestionToken,
   KnowledgeEntry,
   Milestone,
   Prompt,
@@ -427,5 +429,47 @@ export function toResumeExport(r: Row): {
     generatedAt: str(r.generated_at),
     body: str(r.body),
     meta: (r.inputs ?? {}) as Record<string, unknown>,
+  };
+}
+
+/**
+ * An ingestion token row, minus the only field that matters to an attacker.
+ *
+ * `token_hash` is deliberately not mapped. The domain type has no field for
+ * it, so no screen, action or log can render it even by accident — the hash is
+ * not the secret, but it is the thing the endpoint compares against, and it
+ * has no business leaving the adapter.
+ */
+export function toIngestionToken(r: Row): IngestionToken {
+  return {
+    id: str(r.id),
+    workspaceId: str(r.workspace_id),
+    name: str(r.name),
+    tokenPrefix: nstr(r.token_prefix),
+    scopeTopicId: nstr(r.scope_topic_id),
+    scopeSubtopicId: nstr(r.scope_subtopic_id),
+    lastUsedAt: nstr(r.last_used_at),
+    revokedAt: nstr(r.revoked_at),
+    expiresAt: nstr(r.expires_at),
+    rotatedFromId: nstr(r.rotated_from_id),
+    createdAt: str(r.created_at),
+  };
+}
+
+/** The receipt `ingest_from_token()` returns, as the sender sees it. */
+export function toIngestReceipt(v: unknown): IngestReceipt {
+  const r = (v ?? {}) as Row;
+  return {
+    ingestionRecordId: str(r.ingestionRecordId),
+    status: (nstr(r.status) ?? 'unsorted') as IngestReceipt['status'],
+    topicId: nstr(r.topicId),
+    subtopicId: nstr(r.subtopicId),
+    sourceSessionId: nstr(r.sourceSessionId),
+    entryIds: strArray(r.entryIds),
+    fileReferenceIds: strArray(r.fileReferenceIds),
+    completedActionIds: strArray(r.completedActionIds),
+    nextActionIds: strArray(r.nextActionIds),
+    proposedDecisionIds: strArray(r.proposedDecisionIds),
+    replayed: bool(r.replayed),
   };
 }

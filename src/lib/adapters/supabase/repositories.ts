@@ -10,8 +10,10 @@ import type {
   EntityType,
   FileReference,
   Idea,
+  IngestReceipt,
   IngestionRecord,
   IngestionStatus,
+  IngestionToken,
   KnowledgeEntry,
   Milestone,
   Prompt,
@@ -46,6 +48,8 @@ import {
   type FileRepository,
   type IdeaRepository,
   type InboxRepository,
+  type IngestDelivery,
+  type IngestGateway,
   type KnowledgeRepository,
   type PromptRepository,
   type ProposalRepository,
@@ -57,6 +61,8 @@ import {
   type SearchRepository,
   type SessionUser,
   type TimelineRepository,
+  type TokenIdentity,
+  type TokenRepository,
   type SourceSessionRepository,
   type SubtopicRepository,
   type TopicRepository,
@@ -354,7 +360,10 @@ class SupabaseTopics implements TopicRepository {
       currentEntries: timeline.filter((e) => e.status === 'active' && e.supersededById === null),
       timeline,
       activeDecisions: allDecisions.filter((d) => d.status === 'active'),
-      supersededDecisions: allDecisions.filter((d) => d.status !== 'active'),
+      supersededDecisions: allDecisions.filter(
+        (d) => d.status !== 'active' && d.status !== 'proposed',
+      ),
+      pendingDecisions: allDecisions.filter((d) => d.status === 'proposed'),
       rejectedIdeas: allIdeas.filter((i) => i.status === 'rejected'),
       openActions: actionRows,
       winningPrompts,
@@ -2368,7 +2377,162 @@ class SupabaseResumeHistory implements ResumeHistoryRepository {
   }
 }
 
+/**
+ * Ingestion tokens, from the owner's side.
+ *
+ * Reads and writes through the visitor's own session, so RLS decides which
+ * tokens exist — a member of one workspace cannot list, revoke or rotate
+ * another's. The secret never passes through here: `create` is handed a hash
+ * that `mintToken()` produced, and `select` never asks for `token_hash`.
+ */
+class SupabaseTokens implements TokenRepository {
+  constructor(private readonly db: SupabaseClient) {}
+
+  private static readonly COLUMNS =
+    'id,workspace_id,name,token_prefix,scope_topic_id,scope_subtopic_id,last_used_at,revoked_at,expires_at,rotated_from_id,created_at';
+
+  async list(workspaceId: string): Promise<IngestionToken[]> {
+    const { data, error } = await this.db
+      .from('ingestion_tokens')
+      .select(SupabaseTokens.COLUMNS)
+      .eq('workspace_id', workspaceId)
+      .order('created_at', { ascending: false });
+    if (error) throw new Error(`list tokens: ${error.message}`);
+    return ((data ?? []) as Row[]).map(map.toIngestionToken);
+  }
+
+  async getById(id: string): Promise<IngestionToken | null> {
+    const { data, error } = await this.db
+      .from('ingestion_tokens')
+      .select(SupabaseTokens.COLUMNS)
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(`get token: ${error.message}`);
+    return data ? map.toIngestionToken(data as unknown as Row) : null;
+  }
+
+  async create(input: {
+    workspaceId: string;
+    name: string;
+    tokenHash: string;
+    tokenPrefix: string;
+    scopeTopicId?: string | null;
+    scopeSubtopicId?: string | null;
+    expiresAt?: string | null;
+    rotatedFromId?: string | null;
+  }): Promise<IngestionToken> {
+    const { data: userRes } = await this.db.auth.getUser();
+    const userId = userRes.user?.id;
+    if (!userId) throw new Error('create token: not signed in');
+
+    const res = await this.db
+      .from('ingestion_tokens')
+      .insert({
+        workspace_id: input.workspaceId,
+        user_id: userId,
+        name: input.name,
+        token_hash: input.tokenHash,
+        token_prefix: input.tokenPrefix,
+        scope_topic_id: input.scopeTopicId ?? null,
+        scope_subtopic_id: input.scopeSubtopicId ?? null,
+        expires_at: input.expiresAt ?? null,
+        rotated_from_id: input.rotatedFromId ?? null,
+      })
+      .select(SupabaseTokens.COLUMNS)
+      .single();
+    return map.toIngestionToken(unwrap(res, 'create token'));
+  }
+
+  async revoke(id: string): Promise<IngestionToken> {
+    // Stamped, not deleted: deleting would take the deliveries' provenance
+    // with it, and "when was that machine cut off" is the audit question.
+    const res = await this.db
+      .from('ingestion_tokens')
+      .update({ revoked_at: new Date().toISOString() })
+      .eq('id', id)
+      .is('revoked_at', null)
+      .select(SupabaseTokens.COLUMNS)
+      .single();
+    return map.toIngestionToken(unwrap(res, 'revoke token'));
+  }
+}
+
+/**
+ * The server side of `/api/ingest`.
+ *
+ * Constructed with the service-role client, which is why it is a separate
+ * object from `DataContext` rather than another repository on it: nothing that
+ * renders a page should be able to reach a method that runs without a session.
+ */
+class SupabaseIngestGateway implements IngestGateway {
+  constructor(private readonly db: SupabaseClient) {}
+
+  /**
+   * What a token points at, for the connection check.
+   *
+   * Returns the workspace and scope names and nothing else — no ids beyond the
+   * scope the caller can already write to, no member list, no counts. A
+   * connection check that enumerated a workspace would be a way to use a
+   * leaked token quietly.
+   */
+  async identify(tokenHash: string): Promise<TokenIdentity | null> {
+    const { data, error } = await this.db
+      .from('ingestion_tokens')
+      .select('name,revoked_at,expires_at,scope_topic_id,scope_subtopic_id,workspaces(name),topics(name)')
+      .eq('token_hash', tokenHash)
+      .maybeSingle();
+    if (error) throw new Error(`identify token: ${error.message}`);
+    if (!data) return null;
+
+    const row = data as unknown as Row;
+    const revoked = typeof row.revoked_at === 'string';
+    const expired =
+      typeof row.expires_at === 'string' && Date.parse(row.expires_at) <= Date.now();
+    if (revoked || expired) return null;
+
+    const workspace = (row.workspaces ?? {}) as Row;
+    const topic = (row.topics ?? {}) as Row;
+    return {
+      tokenName: typeof row.name === 'string' ? row.name : '',
+      workspaceName: typeof workspace.name === 'string' ? workspace.name : '',
+      scopeTopicId: typeof row.scope_topic_id === 'string' ? row.scope_topic_id : null,
+      scopeTopicName: typeof topic.name === 'string' ? topic.name : null,
+      scopeSubtopicId: typeof row.scope_subtopic_id === 'string' ? row.scope_subtopic_id : null,
+    };
+  }
+
+  async deliver(input: IngestDelivery): Promise<IngestReceipt> {
+    const { data, error } = await this.db.rpc('ingest_from_token', {
+      p_token_hash: input.tokenHash,
+      p_idempotency_key: input.idempotencyKey,
+      p_request_fingerprint: input.requestFingerprint,
+      p_topic_id: input.topicId,
+      p_subtopic_id: input.subtopicId,
+      p_adapter_id: input.adapterId,
+      p_source_type: input.sourceType,
+      p_content_type: input.contentType,
+      p_raw: input.raw,
+      p_payload: input.payload,
+      p_title: input.title,
+      p_occurred_at: input.occurredAt,
+      p_external_url: input.externalUrl,
+      p_segments: input.segments,
+      p_code: input.code,
+      p_work: input.work,
+    });
+    // The message is the function's own — 'no such topic', 'that ingestion
+    // token is not valid' — and the route maps it to a status code. It is
+    // never a driver string reaching a user, and it never contains the token.
+    if (error) throw new Error(error.message);
+    return map.toIngestReceipt(data);
+  }
+}
+
 // ---------------------------------------------------------------------------
+
+export function createIngestGateway(db: SupabaseClient): IngestGateway {
+  return new SupabaseIngestGateway(db);
+}
 
 export function createDataContext(db: SupabaseClient): DataContext {
   return {
@@ -2390,6 +2554,7 @@ export function createDataContext(db: SupabaseClient): DataContext {
     proposals: new SupabaseProposals(db),
     recycle: new SupabaseRecycle(db),
     resumeHistory: new SupabaseResumeHistory(db),
+    tokens: new SupabaseTokens(db),
   };
 }
 

@@ -48,6 +48,25 @@ These are permanent. Changing one requires the process at the bottom of this fil
    version is often a later experiment that did worse. `prompts.is_winning` is derived from the
    selection history by trigger and must never be written directly.
 
+### Automated delivery
+9b. **Delivery is not authority.** A machine may record what it observed — repository, branch,
+   commit, files touched, build and test results, an implementation, a bug, a fix, an action it
+   NAMES as completed, the next action it started. It may never replace Current State, supersede
+   or reject a decision, reject an idea, choose a winning prompt version, delete a record or
+   resolve a conflict. A decision it proposes is written `proposed` and stays out of the active
+   list, out of history and off the avoid list until a person approves it. An operation outside
+   the allowlist is refused **by name**, in the payload validator and again in the database —
+   never silently ignored, because a caller that gets a 200 for an operation that never happened
+   is worse off than one that gets an error.
+9c. **An action closes only when a delivery names it.** Its absence from a later payload is
+   evidence of nothing. Closing on omission would silently discard work the user still intends
+   to do.
+9d. **A secret is shown once and stored only as a hash.** Ingestion tokens are minted in one
+   place, returned to the caller for display exactly once, and persisted as SHA-256 plus an
+   eight-character prefix for recognition. No screen, action, log line or error may render a
+   token; the domain type has no field for one. Revoking stamps `revoked_at` — it never deletes
+   the row, because "when was that machine cut off" is the audit question.
+
 ### Provenance
 10. **Two layers, always linked.** Layer 1 `source_sessions` = verbatim, immutable evidence.
     Layer 2 `knowledge_entries` = typed, statused, queryable knowledge. Layer 2 keeps
@@ -126,6 +145,8 @@ These are permanent. Changing one requires the process at the bottom of this fil
 | AD-17 | **Derived read models are database VIEWS with `security_invoker = true`, never materialised tables** | The Timeline and the prompt outcome/winner projections hold nothing of their own, so they cannot drift from the rows they summarise. `security_invoker` is load-bearing rather than decorative: a view runs as its OWNER by default and would read straight past RLS on every underlying table, serving one workspace's history to another while appearing to work. Asserted, not assumed — removing it makes `04_timeline.test.sql` fail with a real leak |
 | AD-19 | **Retrieval is one `security_invoker` projection plus a deterministic ranking function, and never a stored copy of a derived read** | Search has to reach Current State and Master Topic Memory, both of which are computed on read (rule 8, AD-8). Indexing them would mean storing them, which is the one thing AD-8 forbids — so the *authoritative columns they are assembled from* carry the search vectors instead, `topics.current_state` and `topics.goal` among them. `context_snapshots` participate as history, and every hit reports whether it is `current`, `historical` or a `snapshot`, so a saved rendering is never mistaken for the live answer. Ranking is `ts_rank_cd` with fixed state multipliers and a total-order tiebreak, so paging cannot drop or repeat a row and the same query always ranks the same |
 | AD-20 | **A function that MUTATES rows dispatches on an explicit allowlist of statically compiled statements, never on an interpolated table name** | `entity_exists()` interpolates through `format(%I)` safely only because the enum constrains its input — a guarantee that lives in the type, not the function. For a function that writes, that is too much trust to place in an argument: adding an enum value later, or any future overload taking `text`, would silently widen what a caller can write to. `soft_delete_record()` therefore has one `UPDATE` per supported type and no code path that builds a name. Append-only history, Layer 1 evidence, inbox captures and derived snapshots are each refused explicitly, with their own message |
+| AD-21 | **The ingestion endpoint's workspace comes from the token row, and its boundary is an explicit check rather than RLS** | A delivery carries no Supabase session, so there is nothing for a policy to read — the endpoint runs as `service_role`, which bypasses RLS by design. The first design dropped to `authenticated` inside a `SECURITY DEFINER` function so the ordinary policies would apply; PostgreSQL forbids `SET ROLE` there, and a version that silently failed to switch would have looked identical while enforcing nothing. So `ingest_from_token()` is `SECURITY INVOKER`, `EXECUTE` is granted to `service_role` alone, every topic and subtopic lookup is scoped to the token's workspace, and a topic in another workspace is answered exactly as one that does not exist. Because the boundary is code rather than policy, it is asserted in `supabase/tests/08_ingest.test.sql` rather than assumed |
+| AD-22 | **Idempotency and duplicate detection are different mechanisms and must never be merged** | Idempotency compares a key the CLIENT chose: the same token and key replay the original receipt and write nothing, and the same key with different content is refused rather than answered with the wrong receipt — enforced by a unique index on `(token_id, idempotency_key)`, not by the endpoint remembering to check. Duplicate detection compares CONTENT and proposes a merge to a person (rule 17). Collapsing them would either make a retry create a duplicate, or make the system silently decide that two genuinely separate deliveries were one |
 | AD-18 | **Judgements about a record are appended, never written onto it** | Prompt outcomes and winning-version selections each live in their own append-only table, ordered by an identity sequence — not by `created_at`, which is fixed for a whole transaction and silently degrades to comparing random uuids. Re-rating appends, so a changed judgement is history rather than an overwrite, exactly as superseding is for decisions. The seeding rule keeps this from becoming two sources of truth: a row is written whenever the parent is created, so the newest row is always the answer with no fallback |
 
 ---
@@ -171,7 +192,10 @@ npm run db:types     # regenerate adapter-internal DB types
 npm run provision            # the whole hosted sequence: link, migrate, verify, deploy
 npm run schema:parity        # hosted vs repository catalogs, without a Postgres connection
 npm run verify:hosted        # the two hosted SQL suites over the Management API (AD-15)
-npm run validate:hosted -- <url>   # auth, persistence, isolation, provenance, authenticated QA
+npm run validate:hosted -- <url>   # auth, persistence, isolation, provenance, ingestion, authenticated QA
+
+npm run contextshelf:sync          # send this Claude Code session to ContextShelf
+npm run contextshelf:sync -- --check   # verify the token and what it points at
 ```
 
 All five of `build`, `typecheck`, `lint`, `test`, and `test:db` must pass before merging to
@@ -192,6 +216,7 @@ src/lib/ports/      repository interfaces (no vendor names)
 src/lib/adapters/   supabase/ — the ONLY place the vendor SDK appears
 src/lib/ingestion/  adapters → extract (deterministic) → classify (suggests only) → persist
 src/lib/resume/     pure context assembler
+src/app/api/ingest/ the authenticated Claude Code endpoint — transport only
 supabase/migrations/  checked-in SQL — never change schema from the dashboard
 supabase/tests/     SQL suites run by npm run test:db against a real cluster
 scripts/            db-test.sh · responsive-qa.mjs

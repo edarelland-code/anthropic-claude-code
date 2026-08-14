@@ -1,0 +1,26 @@
+-- Revoke `anon` from the delivery ledger.
+--
+-- A separate migration rather than an edit to 0005, which was already applied
+-- (CLAUDE.md: never change an applied migration). The one-line fix is worth
+-- less than the record of why it was needed.
+--
+-- Supabase configures `alter default privileges ... grant all on tables to
+-- anon, authenticated, service_role` on the public schema, so every NEW table
+-- arrives readable by the anonymous role and RLS is the only thing standing in
+-- front of it. 0001 revoked `anon` across the schema once; that grant is not
+-- retroactive to tables created later, so each new table has to say so again —
+-- 0002 does it for the outcome and winner tables, 0004 for `search_documents`,
+-- and 0005 forgot to for `ingestion_deliveries`.
+--
+-- The local test cluster does not reproduce Supabase's default privileges, so
+-- `npm run test:db` passed and `hosted/01_verify_schema.sql` did not. That is
+-- the check earning its place: "anon has no table privileges" is exactly the
+-- kind of assertion whose value only shows on the real project.
+--
+-- Defence in depth rather than the defence: `ingestion_deliveries` has had
+-- row-level security and a workspace policy since 0005, so an anonymous caller
+-- could not read another workspace's rows even with the grant. The grant would
+-- still have let one confirm that the table exists and count nothing at all,
+-- and there is no reason for it to be reachable at all.
+
+revoke all on ingestion_deliveries from anon;

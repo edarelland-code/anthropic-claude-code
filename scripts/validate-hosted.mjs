@@ -705,6 +705,350 @@ try {
       subPreview.includes('Active Decisions'), 'project-wide decisions kept');
   }
 
+  // --- S. Claude Code ingestion over the real endpoint ----------------------
+  //
+  // Driven through the deployed HTTP endpoint with a real token created
+  // through the real UI, then asserted in the database. A 201 is evidence the
+  // route answered; only the rows are evidence it wrote (AD-16).
+  heading('S. Claude Code ingestion');
+
+  // The token is created the way a person creates one, so the screen is under
+  // test too — not just the API.
+  await a.goto(`${BASE}/settings`, { waitUntil: 'networkidle' });
+  await a.fill('input[name="name"]', 'QA laptop').catch(() => {});
+  await a.click('button:has-text("Create token")').catch(() => {});
+  await a.waitForFunction(() => /cs_live_/.test(document.body.innerText), null, { timeout: 30_000 }).catch(() => {});
+  const shownToken = await a
+    .locator('pre')
+    .filter({ hasText: /cs_live_[A-Za-z0-9_-]{40,}/ })
+    .first()
+    .innerText()
+    .catch(() => '');
+  const ingestToken = shownToken.trim();
+
+  record('a token is created through the UI and shown once',
+    /^cs_live_[A-Za-z0-9_-]{40,}$/.test(ingestToken),
+    ingestToken ? `${ingestToken.slice(0, 16)}…` : 'no token rendered');
+
+  // The secret is not recoverable. Reloading the page must not bring it back,
+  // and the database must not be holding it in readable form.
+  await a.reload({ waitUntil: 'networkidle' });
+  const afterReloadText = await a.innerText('body').catch(() => '');
+  record('the token is not shown again after a reload',
+    ingestToken.length > 0 && !afterReloadText.includes(ingestToken),
+    'shown once only');
+
+  const { data: tokenRows } = await admin
+    .from('ingestion_tokens')
+    .select('id,token_hash,token_prefix,revoked_at,workspace_id')
+    .eq('name', 'QA laptop');
+  const tokenRow = (tokenRows ?? [])[0] ?? null;
+  record('only a hash is stored',
+    Boolean(tokenRow) && tokenRow.token_hash !== ingestToken && /^[0-9a-f]{64}$/.test(tokenRow.token_hash ?? ''),
+    tokenRow ? 'sha-256, not the token' : 'no token row');
+
+  const ingest = async (payload, { token = ingestToken, key = null, method = 'POST' } = {}) => {
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    if (key) headers['Idempotency-Key'] = key;
+    const res = await fetch(`${BASE}/api/ingest`, {
+      method,
+      headers,
+      body: method === 'GET' ? undefined : JSON.stringify(payload),
+    });
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  };
+
+  // The connection check a user runs first.
+  const checked = await ingest(null, { method: 'GET' });
+  record('the connection check identifies the token',
+    checked.status === 200 && checked.body.ok === true,
+    checked.body.workspaceName ? `workspace ${checked.body.workspaceName}` : `status ${checked.status}`);
+
+  // An anonymous request must not reach it, and must not be redirected to a
+  // login page either — a machine would read a 307 to HTML as success.
+  const anonymous = await fetch(`${BASE}/api/ingest`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+    redirect: 'manual',
+  });
+  record('the endpoint is not anonymous', anonymous.status === 401, `status ${anonymous.status}`);
+  record('an unauthenticated delivery is refused, not redirected',
+    anonymous.status !== 307 && anonymous.status !== 302,
+    `status ${anonymous.status}`);
+
+  const forged = await ingest({ version: 1, source: 'claude_code' }, { token: 'cs_live_thistokenwasneverissuedatall' });
+  record('an invented token is refused', forged.status === 401, `status ${forged.status}`);
+
+  // The action that this delivery will report as finished, and one it will not
+  // mention. Created directly so the before/after is unambiguous.
+  const ownerId = (await admin.auth.admin.listUsers()).data.users.find((u) => u.email === USER_A)?.id;
+  const { data: seededActions } = await admin
+    .from('actions')
+    .insert([
+      { workspace_id: tokenRow?.workspace_id, topic_id: topicId, user_id: ownerId, kind: 'next_step', title: 'Wire the export button', position: 90 },
+      { workspace_id: tokenRow?.workspace_id, topic_id: topicId, user_id: ownerId, kind: 'next_step', title: 'Write the migration guide', position: 91 },
+    ])
+    .select('id,title');
+  const doneAction = (seededActions ?? []).find((x) => x.title === 'Wire the export button');
+  const untouchedAction = (seededActions ?? []).find((x) => x.title === 'Write the migration guide');
+
+  const currentStateBefore = (
+    await admin.from('topics').select('current_state').eq('id', topicId).single()
+  ).data?.current_state;
+
+  const payload = {
+    version: 1,
+    source: 'claude_code',
+    title: 'QA session — export button',
+    occurredAt: new Date().toISOString(),
+    target: { topicId },
+    code: {
+      repoUrl: 'https://github.com/example/dailyrelay',
+      branch: 'phase-5-ingestion',
+      commitSha: '9f2c1ab7de34',
+      filesChanged: ['src/export.ts'],
+      filesAdded: ['src/receipt.ts'],
+      filesRemoved: ['src/legacy-export.ts'],
+      buildStatus: 'passed',
+      testSummary: '211 passed, 0 failed',
+    },
+    messages: [
+      { role: 'user', content: 'wire the export button' },
+      { role: 'assistant', content: 'done — the kumquat4 marker proves this transcript is stored.' },
+    ],
+    segments: [
+      { knowledgeType: 'implementation', title: 'Export button wired to the receipt view', sourceReference: 'msg:2' },
+      { knowledgeType: 'bug', title: 'Clipboard rejected without a user gesture' },
+      { knowledgeType: 'fix', title: 'Select the text as a fallback' },
+    ],
+    work: {
+      completedActions: [{ title: 'Wire the export button' }],
+      nextActions: [{ kind: 'next_step', title: 'Render the receipt ids' }],
+      proposedDecisions: [
+        { title: 'Drop the legacy exporter', decision: 'Remove src/legacy-export.ts', reason: 'Nothing imports it.' },
+      ],
+    },
+  };
+
+  const IDEM = `qa-${Date.now()}`;
+  const delivered = await ingest(payload, { key: IDEM });
+  const receipt = delivered.body.receipt ?? {};
+  record('a real payload is accepted and returns a receipt',
+    delivered.status === 201 && Boolean(receipt.ingestionRecordId),
+    delivered.status === 201 ? `record ${String(receipt.ingestionRecordId).slice(0, 8)}…` : `status ${delivered.status} ${JSON.stringify(delivered.body).slice(0, 200)}`);
+
+  const { data: ingestionRow } = await admin
+    .from('ingestion_records')
+    .select('id,status,created_source_session_id,created_entry_ids,source_type,adapter_id')
+    .eq('id', receipt.ingestionRecordId ?? '00000000-0000-0000-0000-000000000000')
+    .maybeSingle();
+  record('ingestion history exists',
+    Boolean(ingestionRow) && ingestionRow.adapter_id === 'claude-session-json',
+    ingestionRow ? `${ingestionRow.status} via ${ingestionRow.adapter_id}` : 'no row');
+
+  const ingestSessionId = ingestionRow?.created_source_session_id ?? null;
+  const { data: sessionRow } = ingestSessionId
+    ? await admin.from('source_sessions').select('*').eq('id', ingestSessionId).single()
+    : { data: null };
+  record('a Source Session exists with the verbatim content',
+    Boolean(sessionRow) && String(sessionRow.raw_content).includes('kumquat4'),
+    sessionRow ? `session ${String(sessionRow.id).slice(0, 8)}…` : 'no session');
+  record('repository, branch and commit are persisted',
+    sessionRow?.repo_url === 'https://github.com/example/dailyrelay' &&
+      sessionRow?.branch === 'phase-5-ingestion' && sessionRow?.commit_sha === '9f2c1ab7de34',
+    sessionRow ? `${sessionRow.branch} @ ${sessionRow.commit_sha}` : '—');
+  record('build and test state are persisted',
+    sessionRow?.build_status === 'passed' && String(sessionRow?.test_summary).includes('211 passed'),
+    sessionRow ? `${sessionRow.build_status} · ${sessionRow.test_summary}` : '—');
+
+  const { data: ingestedEntries } = await admin
+    .from('knowledge_entries')
+    .select('id,knowledge_type,title,source_session_id,source_reference,source_type')
+    .eq('source_session_id', ingestSessionId ?? '00000000-0000-0000-0000-000000000000');
+  const types = (ingestedEntries ?? []).map((e) => e.knowledge_type).sort();
+  record('the implementation, the bug and the fix all exist',
+    types.join(',') === 'bug,fix,implementation', types.join(', ') || 'none');
+  record('every entry carries provenance back to the session',
+    (ingestedEntries ?? []).length > 0 &&
+      (ingestedEntries ?? []).every((e) => e.source_session_id === ingestSessionId && e.source_type === 'claude_code'),
+    `${(ingestedEntries ?? []).length} entries linked`);
+
+  const { data: ingestedFiles } = await admin
+    .from('file_references')
+    .select('id,path,kind,commit_sha,storage_path,url,source_session_id')
+    .eq('source_session_id', ingestSessionId ?? '00000000-0000-0000-0000-000000000000');
+  record('file references exist for every path the session touched',
+    (ingestedFiles ?? []).length === 3, `${(ingestedFiles ?? []).length} of 3`);
+  record('no upload was faked',
+    (ingestedFiles ?? []).every((f) => f.storage_path === null && f.url === null),
+    'references only');
+
+  const { data: actionsAfter } = await admin
+    .from('actions')
+    .select('id,title,status,source_session_id')
+    .eq('topic_id', topicId);
+  const closed = (actionsAfter ?? []).find((x) => x.id === doneAction?.id);
+  const kept = (actionsAfter ?? []).find((x) => x.id === untouchedAction?.id);
+  const opened = (actionsAfter ?? []).find((x) => x.title === 'Render the receipt ids');
+  record('the named action is completed', closed?.status === 'done', `status ${closed?.status}`);
+  record('an action the delivery never mentioned is untouched',
+    kept?.status === 'open', `status ${kept?.status} — omission is not evidence`);
+  record('the new next action exists and is open',
+    opened?.status === 'open' && opened?.source_session_id === ingestSessionId,
+    opened ? 'Render the receipt ids' : 'missing');
+
+  const { data: proposed } = await admin
+    .from('decisions')
+    .select('id,title,status,source_type')
+    .eq('source_session_id', ingestSessionId ?? '00000000-0000-0000-0000-000000000000');
+  record('the decision is review-gated, not active',
+    (proposed ?? []).length === 1 && proposed[0].status === 'proposed',
+    proposed?.[0] ? `status ${proposed[0].status}` : 'no decision');
+
+  const { data: topicAfter } = await admin
+    .from('topics').select('current_state').eq('id', topicId).single();
+  record('Current State was not replaced by the delivery',
+    topicAfter?.current_state === currentStateBefore, 'unchanged');
+
+  // Timeline and search see it, through the real projections.
+  const { data: timelineHits } = await userA
+    .from('timeline_events').select('id,title').eq('topic_id', topicId);
+  record('the Timeline sees the ingested work',
+    (timelineHits ?? []).some((t) => t.title === 'Export button wired to the receipt view'),
+    `${(timelineHits ?? []).length} events`);
+
+  const { data: searchHits } = await userA.rpc('search_records', {
+    p_workspace_id: tokenRow?.workspace_id ?? null, p_query: 'kumquat4',
+  });
+  record('search sees the ingested transcript',
+    (searchHits ?? []).length >= 1, `${(searchHits ?? []).length} hit(s)`);
+
+  // Resume: the regression that matters.
+  await a.goto(`${BASE}/topics/${topicId}/resume`, { waitUntil: 'networkidle' });
+  await a.waitForFunction(() => /ContextShelf Resume Context/.test(document.body.innerText), null, { timeout: 30_000 }).catch(() => {});
+  const chatResume = (await a.locator('pre').first().innerText().catch(() => '')) || '';
+  await a.click('button:has-text("Claude Code")').catch(() => {});
+  // Wait for the preview to CHANGE, not for a word that the previous document
+  // already contained. `Immediate` appears in the Chat render too, so matching
+  // it returned instantly and every assertion below read the stale text — the
+  // same mistake that failed a working feature twice in Phase 4.
+  await a.waitForFunction(
+    (previous) => {
+      const pre = document.querySelector('pre');
+      return pre !== null && pre.textContent !== null && pre.textContent !== previous;
+    },
+    chatResume,
+    { timeout: 30_000 },
+  ).catch(() => {});
+  const codeResume = (await a.locator('pre').first().innerText().catch(() => '')) || '';
+  record('the Claude Code destination re-rendered',
+    codeResume.includes('Destination:** Claude Code'), 'code profile on screen');
+
+  // The Claude Code profile heads this section "Immediate Coding Task"; Chat and
+  // Cowork call it "Immediate Next Action". Matching only the Chat wording made
+  // a passing feature look broken.
+  record('the Resume names the new immediate next action',
+    /Immediate (Next Action|Coding Task)[\s\S]{0,400}Render the receipt ids/.test(codeResume),
+    'Render the receipt ids');
+  record('the completed action is no longer the next action',
+    !/Immediate Next[\s\S]{0,200}Wire the export button/.test(codeResume),
+    'Wire the export button has moved on');
+  record('the Resume carries repository, branch and commit',
+    codeResume.includes('phase-5-ingestion') && codeResume.includes('9f2c1ab7de34'),
+    'repo state present');
+  record('the Resume carries build and test state',
+    codeResume.includes('**Build:** passed') && codeResume.includes('211 passed'),
+    'build and tests present');
+  record('the implementation and the fix appear',
+    codeResume.includes('Export button wired to the receipt view') &&
+      codeResume.includes('Select the text as a fallback'),
+    'work present');
+  record('the proposed decision never reaches the avoid list',
+    !/Avoid \/ Do Not Repeat[\s\S]*Drop the legacy exporter/.test(codeResume),
+    'nobody turned it down, so nothing tells the session to avoid it');
+  // Sliced between headings rather than matched by proximity. The Proposed
+  // section sits directly beneath the Active one, so "within 600 characters of
+  // Active Decisions" was true of a correctly review-gated document — an
+  // assertion that failed the very behaviour it was written to protect.
+  const sectionBody = (heading) => {
+    const start = codeResume.indexOf(heading);
+    if (start === -1) return '';
+    const rest = codeResume.slice(start + heading.length);
+    const end = rest.indexOf('\n## ');
+    return end === -1 ? rest : rest.slice(0, end);
+  };
+  record('the proposed decision is present but NOT active',
+    sectionBody('Proposed Decisions — AWAITING REVIEW, NOT IN FORCE').includes('Drop the legacy exporter') &&
+      !sectionBody('Active Decisions — CURRENT').includes('Drop the legacy exporter'),
+    'listed under review, absent from the active list');
+
+  // Idempotency: the same key and the same body.
+  const replayed = await ingest(payload, { key: IDEM });
+  record('an identical retry returns the original receipt',
+    replayed.status === 200 && replayed.body.receipt?.ingestionRecordId === receipt.ingestionRecordId &&
+      replayed.body.receipt?.replayed === true,
+    `status ${replayed.status}, replayed ${replayed.body.receipt?.replayed}`);
+
+  const { data: entriesAfterReplay } = await admin
+    .from('knowledge_entries').select('id')
+    .eq('source_session_id', ingestSessionId ?? '00000000-0000-0000-0000-000000000000');
+  record('a retry creates nothing',
+    (entriesAfterReplay ?? []).length === (ingestedEntries ?? []).length,
+    `${(entriesAfterReplay ?? []).length} entries, unchanged`);
+
+  const reusedKey = await ingest({ ...payload, title: 'a different payload' }, { key: IDEM });
+  record('the same key with a different payload is refused',
+    reusedKey.status === 409, `status ${reusedKey.status}`);
+
+  // Authority: the workspace comes from the token, never from the payload.
+  const { data: bTopics } = await admin
+    .from('topics').select('id').neq('id', topicId).limit(1);
+  const foreignTopic = (bTopics ?? [])[0]?.id ?? '00000000-0000-0000-0000-000000000000';
+  const crossed = await ingest({ ...payload, target: { topicId: foreignTopic } }, { key: `qa-cross-${Date.now()}` });
+  record('a topic outside the token’s workspace is refused',
+    crossed.status === 404, `status ${crossed.status} — ${crossed.body.error ?? ''}`);
+
+  const namedWorkspace = await ingest(
+    { ...payload, workspaceId: '00000000-0000-0000-0000-000000000000', title: 'workspace named in payload' },
+    { key: `qa-ws-${Date.now()}` },
+  );
+  const { data: strayRows } = await admin
+    .from('ingestion_records').select('id')
+    .eq('workspace_id', '00000000-0000-0000-0000-000000000000');
+  record('a workspace named in the payload is ignored, not honoured',
+    namedWorkspace.status === 201 && (strayRows ?? []).length === 0 &&
+      (namedWorkspace.body.warnings ?? []).some((w) => /comes from the token/.test(w)),
+    'warned and ignored');
+
+  // Forbidden operations are refused by name rather than silently dropped.
+  const forbidden = await ingest(
+    { ...payload, work: { supersedeDecisions: [{ id: 'x' }] }, title: 'forbidden' },
+    { key: `qa-forbid-${Date.now()}` },
+  );
+  record('a delivery cannot ask to supersede a decision',
+    forbidden.status === 422 && JSON.stringify(forbidden.body).includes('supersedeDecisions'),
+    `status ${forbidden.status}`);
+
+  // Revocation, then rotation.
+  await a.goto(`${BASE}/settings`, { waitUntil: 'networkidle' });
+  await a.click('button:has-text("Revoke")').catch(() => {});
+  await a.waitForFunction(() => /Revoked/.test(document.body.innerText), null, { timeout: 30_000 }).catch(() => {});
+  const afterRevoke = await ingest({ ...payload, title: 'after revocation' }, { key: `qa-rev-${Date.now()}` });
+  record('a revoked token can no longer ingest', afterRevoke.status === 401, `status ${afterRevoke.status}`);
+
+  await a.fill('input[name="name"]', 'QA replacement').catch(() => {});
+  await a.click('button:has-text("Create token")').catch(() => {});
+  await a.waitForFunction(() => /cs_live_/.test(document.body.innerText), null, { timeout: 30_000 }).catch(() => {});
+  const replacement = (
+    await a.locator('pre').filter({ hasText: /cs_live_[A-Za-z0-9_-]{40,}/ }).first().innerText().catch(() => '')
+  ).trim();
+  const afterRotate = await ingest(
+    { ...payload, title: 'after rotation' },
+    { token: replacement, key: `qa-rot-${Date.now()}` },
+  );
+  record('a replacement token works', afterRotate.status === 201, `status ${afterRotate.status}`);
+
   // --- C. Persists across a hard reload -------------------------------------
   heading('C. Persistence across a hard reload');
   await a.reload({ waitUntil: 'networkidle' });
