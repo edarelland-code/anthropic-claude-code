@@ -290,7 +290,7 @@ class SupabaseTopics implements TopicRepository {
     const topic = await this.getById(topicId);
     if (!topic) return null;
 
-    const [subtopics, entries, decisions, ideas, actions, files, milestones, sessions, prompts] =
+    const [subtopics, entries, decisions, ideas, actions, files, milestones, sessions, prompts, winning] =
       await Promise.all([
         this.db.from('subtopics').select('*').eq('topic_id', topicId).is('deleted_at', null).order('position'),
         this.db
@@ -312,20 +312,23 @@ class SupabaseTopics implements TopicRepository {
         this.db.from('milestones').select('*').eq('topic_id', topicId).is('deleted_at', null),
         this.db.from('source_sessions').select('*').eq('topic_id', topicId).order('occurred_at', { ascending: false }),
         this.db.from('prompts').select('*, prompt_versions!prompt_versions_prompt_id_fkey(*)').eq('topic_id', topicId).is('deleted_at', null),
+        // The authoritative winning selection. `prompts.is_winning` only says
+        // THAT a prompt has a winner; this says WHICH version, which is the
+        // part that matters (rule 9a).
+        this.db.from('prompt_current_winning').select('*'),
       ]);
 
     const timeline = ((entries.data ?? []) as Row[]).map(map.toEntry);
     const allDecisions = ((decisions.data ?? []) as Row[]).map(map.toDecision);
     const allIdeas = ((ideas.data ?? []) as Row[]).map(map.toIdea);
 
-    const winningPrompts = ((prompts.data ?? []) as Row[])
-      .filter((r) => r.is_winning === true)
-      .map((r) => {
-        const versions = Array.isArray(r.prompt_versions)
-          ? (r.prompt_versions as Row[]).map(map.toPromptVersion).sort((a, b) => b.version - a.version)
-          : [];
-        return { prompt: map.toPrompt(r), version: versions[0] ?? null };
-      });
+    // The winning VERSION, resolved from the selection history — never the
+    // latest one. The rule itself lives in `toWinningPrompts` so it can be
+    // tested without a database; see the comment there for why it matters.
+    const winningPrompts = map.toWinningPrompts(
+      (prompts.data ?? []) as Row[],
+      (winning.data ?? []) as Row[],
+    );
 
     const subtopicRows = ((subtopics.data ?? []) as Row[]).map(map.toSubtopic);
     const actionRows = ((actions.data ?? []) as Row[]).map(map.toAction);

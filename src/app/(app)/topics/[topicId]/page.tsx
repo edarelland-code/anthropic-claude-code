@@ -27,21 +27,20 @@ export default async function TopicPage({ params }: { params: Promise<{ topicId:
   const { topic, subtopics, counts, currentEntries, timeline, activeDecisions, openActions } = ctx;
 
   // Master Topic Memory is derived on every read (AD-8), so it cannot drift
-  // from the records beneath it. The winning VERSION is resolved per prompt —
-  // the latest version is often a later experiment that did worse.
-  const prompts = await data.prompts.listForTopic(topicId);
-  const promptsWithWinners = await Promise.all(
-    prompts.map(async ({ prompt }) => {
-      const full = await data.prompts.getWithVersions(prompt.id);
-      const winning = await data.prompts.getWinning(prompt.id);
-      return {
-        prompt,
-        versions: full?.versions ?? [],
-        winningVersionId: winning?.versionId ?? null,
-        winningReason: winning?.reason ?? null,
-      };
-    }),
-  );
+  // from the records beneath it.
+  //
+  // The winning versions come from `getContext`, which resolves them from
+  // `prompt_current_winning` in the same batched read as everything else. This
+  // used to loop over the prompts issuing two queries each — a real N+1 that
+  // grew with the topic — and it only existed because `ctx.winningPrompts`
+  // could not be trusted to name the right version. Now that it can, the loop
+  // is not needed.
+  const promptsWithWinners = ctx.winningPrompts.map((w) => ({
+    prompt: w.prompt,
+    versions: w.versions,
+    winningVersionId: w.version?.id ?? null,
+    winningReason: w.reason,
+  }));
   const memory = assembleMemory({
     topic,
     subtopics,

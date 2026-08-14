@@ -15,6 +15,7 @@ import type {
   Milestone,
   Prompt,
   PromptVersion,
+  TopicContext,
   RecordState,
   Relationship,
   SearchHit,
@@ -349,4 +350,49 @@ export function toDeletedRecord(r: Row): {
     deletedAt: str(r.created_at),
     restoredAt: nstr(r.restored_at),
   };
+}
+
+/**
+ * Resolves each prompt to the EXACT version that won.
+ *
+ * Pure, and separated from the query that feeds it so the rule can be tested
+ * without a database — because the rule is easy to get wrong in a way nothing
+ * else catches. The first version of this sorted the versions descending and
+ * took the first, which is the NEWEST, and every caller downstream believed it:
+ * Master Topic Memory rendered the wrong body, and a Resume export would have
+ * pasted a later failed experiment into a fresh Claude session under a heading
+ * saying it worked.
+ *
+ * `prompts.is_winning` is deliberately not consulted. It is a derived boolean
+ * meaning "this prompt has a winner somewhere"; the selection rows say which
+ * one, and they are the append-only source of truth (rule 9a).
+ *
+ * A prompt with no selection is omitted. A selection pointing at a version
+ * that is not present yields `version: null` rather than a substitute — a
+ * missing winner is reported, never quietly replaced.
+ */
+export function toWinningPrompts(
+  promptRows: Row[],
+  winningRows: Row[],
+): TopicContext['winningPrompts'] {
+  const selections = new Map<string, Row>();
+  for (const row of winningRows) selections.set(str(row.prompt_id), row);
+
+  const out: TopicContext['winningPrompts'] = [];
+  for (const row of promptRows) {
+    const selection = selections.get(str(row.id));
+    if (!selection) continue;
+
+    const versions = Array.isArray(row.prompt_versions)
+      ? (row.prompt_versions as Row[]).map(toPromptVersion).sort((a, b) => b.version - a.version)
+      : [];
+
+    out.push({
+      prompt: toPrompt(row),
+      version: versions.find((v) => v.id === str(selection.prompt_version_id)) ?? null,
+      versions,
+      reason: nstr(selection.reason),
+    });
+  }
+  return out;
 }
