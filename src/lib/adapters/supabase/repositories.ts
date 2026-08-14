@@ -544,6 +544,7 @@ class SupabaseKnowledge implements KnowledgeRepository {
 
     if (q.topicId) sel = sel.eq('topic_id', q.topicId);
     if (q.workspaceId) sel = sel.eq('workspace_id', q.workspaceId);
+    if (q.sourceSessionId) sel = sel.eq('source_session_id', q.sourceSessionId);
     if (q.types?.length) sel = sel.in('knowledge_type', q.types);
     if (q.sourceTypes?.length) sel = sel.in('source_type', q.sourceTypes);
     if (q.currentOnly) sel = sel.eq('status', 'active').is('superseded_by_id', null);

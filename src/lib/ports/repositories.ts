@@ -139,6 +139,8 @@ export interface EntryQuery {
   topicId?: string;
   subtopicId?: string;
   workspaceId?: string;
+  /** Every Layer 2 entry produced by one Layer 1 session. */
+  sourceSessionId?: string;
   types?: KnowledgeType[];
   sourceTypes?: SourceType[];
   /** Current State when true: active + not superseded. */
@@ -313,6 +315,7 @@ export interface FileRepository {
 
 export interface SourceSessionRepository {
   listForTopic(topicId: string): Promise<SourceSession[]>;
+  listForWorkspace(workspaceId: string, limit?: number): Promise<SourceSession[]>;
   getById(id: string): Promise<SourceSession | null>;
   create(input: Omit<SourceSession, 'id' | 'createdAt'> & { id?: string }): Promise<SourceSession>;
 }
