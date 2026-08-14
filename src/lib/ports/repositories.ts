@@ -665,6 +665,138 @@ export interface IngestGateway {
   deliver(input: IngestDelivery): Promise<IngestReceipt>;
 }
 
+/**
+ * A saved review (Phase 6AB).
+ *
+ * Rows rather than component state, for one reason: losing half an hour of
+ * review because a tab closed would make the feature not worth using. Every
+ * method here writes a PROPOSAL or a judgement about one — nothing on this
+ * interface can make a record authoritative.
+ */
+export interface ExtractionRun {
+  id: string;
+  workspaceId: string;
+  ingestionRecordId: string | null;
+  sourceSessionId: string | null;
+  topicId: string | null;
+  subtopicId: string | null;
+  provider: string;
+  model: string | null;
+  promptVersion: string;
+  status: 'running' | 'succeeded' | 'partial' | 'failed';
+  failureCode: string | null;
+  failureDetail: string | null;
+  chunkCount: number;
+  suggestedCount: number;
+  confirmedCount: number;
+  rejectedCount: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
+  warnings: string[];
+  startedAt: string;
+  finishedAt: string | null;
+}
+
+export interface StoredSuggestion {
+  id: string;
+  runId: string;
+  ordinal: number;
+  kind: string;
+  knowledgeType: KnowledgeType | null;
+  title: string;
+  content: string | null;
+  reason: string | null;
+  statusSuggestion: string | null;
+  suggestedTopicId: string | null;
+  suggestedSubtopicId: string | null;
+  sourceReference: string | null;
+  chunkIndex: number;
+  confidence: number;
+  basis: string[];
+  payload: Record<string, unknown>;
+  /** What the provider actually said, before any edit (6AA). */
+  original: Record<string, unknown>;
+  state: 'suggested' | 'edited' | 'confirmed' | 'rejected';
+  selected: boolean;
+  duplicateOfKind: string | null;
+  duplicateOfId: string | null;
+  duplicateReason: string | null;
+  conflictsWithId: string | null;
+  conflictReason: string | null;
+  createdRecordId: string | null;
+  createdRecordKind: string | null;
+}
+
+/** What a batch confirmation actually did. Exact, never approximate (6AC). */
+export interface ConfirmationReceipt {
+  runId: string;
+  created: Array<{ suggestionId: string; kind: string; recordId: string }>;
+  createdCount: number;
+  skippedCount: number;
+  ingestionRecordId: string | null;
+}
+
+export interface ExtractionRepository {
+  listRunsForRecord(ingestionRecordId: string): Promise<ExtractionRun[]>;
+  listRunsForWorkspace(workspaceId: string, limit?: number): Promise<ExtractionRun[]>;
+  getRun(runId: string): Promise<ExtractionRun | null>;
+  /** The saved review, in render order. */
+  listSuggestions(runId: string): Promise<StoredSuggestion[]>;
+
+  /** Writes the run and every suggestion it produced, in one call. */
+  saveRun(input: {
+    workspaceId: string;
+    ingestionRecordId: string | null;
+    sourceSessionId: string | null;
+    topicId: string | null;
+    subtopicId: string | null;
+    provider: string;
+    model: string | null;
+    promptVersion: string;
+    status: ExtractionRun['status'];
+    failureCode: string | null;
+    failureDetail: string | null;
+    chunkCount: number;
+    inputTokens: number | null;
+    outputTokens: number | null;
+    warnings: string[];
+    suggestions: Array<Omit<StoredSuggestion, 'id' | 'runId' | 'state' | 'createdRecordId' | 'createdRecordKind'>>;
+  }): Promise<ExtractionRun>;
+
+  /**
+   * An edit or a selection change, saved immediately.
+   *
+   * Editing moves the row to `edited`, so "the user changed this before
+   * accepting it" survives — and the record written on confirmation is the
+   * corrected one, never the provider's original.
+   */
+  updateSuggestion(input: {
+    id: string;
+    title?: string;
+    content?: string | null;
+    reason?: string | null;
+    kind?: string;
+    knowledgeType?: KnowledgeType | null;
+    statusSuggestion?: string | null;
+    suggestedTopicId?: string | null;
+    suggestedSubtopicId?: string | null;
+    selected?: boolean;
+    state?: StoredSuggestion['state'];
+  }): Promise<StoredSuggestion>;
+
+  setSelection(runId: string, ids: string[], selected: boolean): Promise<void>;
+  reject(ids: string[]): Promise<void>;
+
+  /** One transaction. Idempotent — an already-confirmed suggestion is skipped. */
+  confirm(input: {
+    runId: string;
+    suggestionIds: string[];
+    topicId: string;
+    subtopicId: string | null;
+  }): Promise<ConfirmationReceipt>;
+}
+
 /** The single object handed to Server Components. */
 export interface DataContext {
   auth: AuthPort;
@@ -686,4 +818,5 @@ export interface DataContext {
   recycle: RecycleRepository;
   resumeHistory: ResumeHistoryRepository;
   tokens: TokenRepository;
+  extraction: ExtractionRepository;
 }

@@ -403,12 +403,18 @@ begin
         -- The body is whatever is in `content`, verbatim. Version 1,
         -- `untested`, and no winning selection — an outcome nobody observed is
         -- not an outcome (6M).
+        -- `prompts` carries no `source_session_id` column — provenance for a
+        -- prompt lives in `metadata`, and the version below anchors the exact
+        -- line it came from.
         insert into prompts (
           workspace_id, topic_id, subtopic_id, user_id, title, purpose,
-          source_type, source_session_id
+          source_type, metadata
         ) values (
           v_run.workspace_id, p_topic_id, p_subtopic_id, auth.uid(),
-          s.title, s.reason, 'manual', v_run.source_session_id
+          s.title, s.reason, 'manual',
+          jsonb_build_object('extractionRunId', p_run_id, 'suggestionId', s.id,
+                             'sourceSessionId', v_run.source_session_id,
+                             'sourceReference', s.source_reference)
         ) returning id into v_id;
 
         select coalesce(max(version), 0) + 1 into v_version
@@ -508,5 +514,11 @@ begin
 end;
 $$;
 
+-- PUBLIC first. PostgreSQL grants EXECUTE on a new function to PUBLIC by
+-- default, and `anon` inherits it — so revoking from `anon` alone leaves the
+-- function callable by an anonymous request. RLS would still refuse the writes,
+-- because `auth.uid()` is null and no policy matches, but a function that
+-- reaches a workspace's rows has no business being callable at all.
+revoke all on function confirm_extraction_suggestions(uuid, uuid[], uuid, uuid) from public;
 revoke all on function confirm_extraction_suggestions(uuid, uuid[], uuid, uuid) from anon;
 grant execute on function confirm_extraction_suggestions(uuid, uuid[], uuid, uuid) to authenticated;

@@ -1,9 +1,11 @@
 import { Check, Cloud, Database, Minus, Trash2 } from 'lucide-react';
 
 import { getData } from '@/lib/data';
+import { providerStatuses } from '@/lib/extraction/providers';
 import { formatDate } from '@/lib/utils';
 
 import { ClaudeCodeConnection } from './claude-code-connection';
+import { ExtractionSettings } from './extraction-settings';
 import { RestoreButton } from './restore-button';
 import { SignOutButton } from './sign-out-button';
 
@@ -27,6 +29,8 @@ export default async function SettingsPage() {
   // The endpoint's own origin, so the setup block a user copies points at the
   // deployment they are actually looking at rather than at a hard-coded host.
   const baseUrl = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://contextshelf.vercel.app';
+  const providers = providerStatuses();
+  const recentRuns = workspace ? await data.extraction.listRunsForWorkspace(workspace.id, 8) : [];
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-6 sm:px-6 lg:py-8">
@@ -66,6 +70,8 @@ export default async function SettingsPage() {
           <Capability label="File uploads to an object store" phase={6} />
         </ul>
       </section>
+
+      <ExtractionSettings providers={providers} runs={recentRuns} />
 
       <ClaudeCodeConnection
         tokens={tokens}

@@ -91,6 +91,19 @@ These are permanent. Changing one requires the process at the bottom of this fil
     `Suggestion<T>` rather than a `T` so a caller has to reach through it, and never becomes
     authoritative without a person confirming it. In a list of proposals, what the source *stated*
     is pre-selected; what was *guessed* is not.
+17c. **A provider may suggest; a person confirms.** Model or matcher, the output is a
+    `SuggestedRecord` that lands in `extraction_suggestions` and becomes a record only when someone
+    confirms it. Confirmation writes a decision `proposed`, an idea `suggested` and a prompt
+    version `untested` and never winning; Current State is refused by the batch path by name and
+    has its own compare-and-accept flow. Nothing about a suggestion's confidence may pre-select an
+    authority-changing kind, and a suggestion that duplicates or conflicts with an existing record
+    is never pre-selected either.
+17d. **Never call deterministic extraction AI.** When no model provider is configured, every
+    user-facing string says what actually ran — "Extract suggestions", "deterministic extraction",
+    "it does not understand the conversation". A reviewer who believes a model read their
+    conversation reviews far less carefully than one who knows a matcher scanned it, and the review
+    is the only thing between a suggestion and the project's memory. A provider credential lives in
+    the server environment and never in a table, a client bundle, git, this file, or a log.
 17a. **Never surface a raw driver error.** Everything thrown by the data layer goes through
     `toUserFacingError()`; the detail is logged server-side, the user gets an actionable
     sentence. Never fail silently either — every failure path renders something.
@@ -147,6 +160,7 @@ These are permanent. Changing one requires the process at the bottom of this fil
 | AD-20 | **A function that MUTATES rows dispatches on an explicit allowlist of statically compiled statements, never on an interpolated table name** | `entity_exists()` interpolates through `format(%I)` safely only because the enum constrains its input — a guarantee that lives in the type, not the function. For a function that writes, that is too much trust to place in an argument: adding an enum value later, or any future overload taking `text`, would silently widen what a caller can write to. `soft_delete_record()` therefore has one `UPDATE` per supported type and no code path that builds a name. Append-only history, Layer 1 evidence, inbox captures and derived snapshots are each refused explicitly, with their own message |
 | AD-21 | **The ingestion endpoint's workspace comes from the token row, and its boundary is an explicit check rather than RLS** | A delivery carries no Supabase session, so there is nothing for a policy to read — the endpoint runs as `service_role`, which bypasses RLS by design. The first design dropped to `authenticated` inside a `SECURITY DEFINER` function so the ordinary policies would apply; PostgreSQL forbids `SET ROLE` there, and a version that silently failed to switch would have looked identical while enforcing nothing. So `ingest_from_token()` is `SECURITY INVOKER`, `EXECUTE` is granted to `service_role` alone, every topic and subtopic lookup is scoped to the token's workspace, and a topic in another workspace is answered exactly as one that does not exist. Because the boundary is code rather than policy, it is asserted in `supabase/tests/08_ingest.test.sql` rather than assumed |
 | AD-22 | **Idempotency and duplicate detection are different mechanisms and must never be merged** | Idempotency compares a key the CLIENT chose: the same token and key replay the original receipt and write nothing, and the same key with different content is refused rather than answered with the wrong receipt — enforced by a unique index on `(token_id, idempotency_key)`, not by the endpoint remembering to check. Duplicate detection compares CONTENT and proposes a merge to a person (rule 17). Collapsing them would either make a retry create a duplicate, or make the system silently decide that two genuinely separate deliveries were one |
+| AD-23 | **Model assistance is a provider behind a port, and the review is rows** | `ExtractionProvider` names no vendor and omits — rather than merely discourages — every power a provider must not have: it cannot decide duplicates, resolve conflicts, write records or choose what is authoritative. Duplicate and conflict findings come from the Phase 3 fingerprint, because a provider's opinion about whether it has seen a decision before is a guess about a database it cannot see. Suggestions persist in `extraction_suggestions` rather than in component state, because half an hour of review must survive a closed tab, and the row keeps both the current value and the provider's `original` so an edit stays legible as an edit. The deterministic provider needs no credential and sends nothing anywhere, which is what makes every one of these guarantees true whether or not a model is ever configured |
 | AD-18 | **Judgements about a record are appended, never written onto it** | Prompt outcomes and winning-version selections each live in their own append-only table, ordered by an identity sequence — not by `created_at`, which is fixed for a whole transaction and silently degrades to comparing random uuids. Re-rating appends, so a changed judgement is history rather than an overwrite, exactly as superseding is for decisions. The seeding rule keeps this from becoming two sources of truth: a row is written whenever the parent is created, so the newest row is always the answer with no fallback |
 
 ---
@@ -216,6 +230,7 @@ src/lib/ports/      repository interfaces (no vendor names)
 src/lib/adapters/   supabase/ — the ONLY place the vendor SDK appears
 src/lib/ingestion/  adapters → extract (deterministic) → classify (suggests only) → persist
 src/lib/resume/     pure context assembler
+src/lib/extraction/ provider port · deterministic provider · validation · chunking · review
 src/app/api/ingest/ the authenticated Claude Code endpoint — transport only
 supabase/migrations/  checked-in SQL — never change schema from the dashboard
 supabase/tests/     SQL suites run by npm run test:db against a real cluster

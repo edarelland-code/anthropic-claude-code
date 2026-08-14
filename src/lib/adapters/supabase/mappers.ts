@@ -28,6 +28,7 @@ import type {
   Topic,
   Workspace,
 } from '@/lib/domain/types';
+import type { ExtractionRun, StoredSuggestion } from '@/lib/ports/repositories';
 
 type Row = Record<string, unknown>;
 
@@ -471,5 +472,71 @@ export function toIngestReceipt(v: unknown): IngestReceipt {
     nextActionIds: strArray(r.nextActionIds),
     proposedDecisionIds: strArray(r.proposedDecisionIds),
     replayed: bool(r.replayed),
+  };
+}
+
+/** An extraction run row. */
+export function toExtractionRun(r: Row): ExtractionRun {
+  return {
+    id: str(r.id),
+    workspaceId: str(r.workspace_id),
+    ingestionRecordId: nstr(r.ingestion_record_id),
+    sourceSessionId: nstr(r.source_session_id),
+    topicId: nstr(r.topic_id),
+    subtopicId: nstr(r.subtopic_id),
+    provider: str(r.provider),
+    model: nstr(r.model),
+    promptVersion: str(r.prompt_version),
+    status: (nstr(r.status) ?? 'failed') as ExtractionRun['status'],
+    failureCode: nstr(r.failure_code),
+    failureDetail: nstr(r.failure_detail),
+    chunkCount: num(r.chunk_count, 1),
+    suggestedCount: num(r.suggested_count),
+    confirmedCount: num(r.confirmed_count),
+    rejectedCount: num(r.rejected_count),
+    inputTokens: typeof r.input_tokens === 'number' ? r.input_tokens : null,
+    outputTokens: typeof r.output_tokens === 'number' ? r.output_tokens : null,
+    costUsd: typeof r.cost_usd === 'number' ? r.cost_usd : null,
+    warnings: strArray(r.warnings),
+    startedAt: str(r.started_at),
+    finishedAt: nstr(r.finished_at),
+  };
+}
+
+/**
+ * One saved suggestion.
+ *
+ * `original` is carried through untouched. It is the only record of what the
+ * provider actually said once a user has edited the row, and an audit that
+ * cannot tell an edit from an original is not an audit.
+ */
+export function toStoredSuggestion(r: Row): StoredSuggestion {
+  return {
+    id: str(r.id),
+    runId: str(r.run_id),
+    ordinal: num(r.ordinal),
+    kind: str(r.kind),
+    knowledgeType: (nstr(r.knowledge_type) as StoredSuggestion['knowledgeType']) ?? null,
+    title: str(r.title),
+    content: nstr(r.content),
+    reason: nstr(r.reason),
+    statusSuggestion: nstr(r.status_suggestion),
+    suggestedTopicId: nstr(r.suggested_topic_id),
+    suggestedSubtopicId: nstr(r.suggested_subtopic_id),
+    sourceReference: nstr(r.source_reference),
+    chunkIndex: num(r.chunk_index),
+    confidence: num(r.confidence),
+    basis: strArray(r.basis),
+    payload: (r.payload ?? {}) as Record<string, unknown>,
+    original: (r.original ?? {}) as Record<string, unknown>,
+    state: (nstr(r.state) ?? 'suggested') as StoredSuggestion['state'],
+    selected: bool(r.selected),
+    duplicateOfKind: nstr(r.duplicate_of_kind),
+    duplicateOfId: nstr(r.duplicate_of_id),
+    duplicateReason: nstr(r.duplicate_reason),
+    conflictsWithId: nstr(r.conflicts_with_id),
+    conflictReason: nstr(r.conflict_reason),
+    createdRecordId: nstr(r.created_record_id),
+    createdRecordKind: nstr(r.created_record_kind),
   };
 }
