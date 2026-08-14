@@ -18,7 +18,7 @@ export function NewTopicForm() {
           required
           maxLength={120}
           autoFocus
-          className="w-full rounded-md px-3 py-2 text-sm surface"
+          className="w-full rounded-md px-3 py-2.5 text-sm surface"
           placeholder="DailyRelay"
         />
       </Field>
@@ -28,7 +28,7 @@ export function NewTopicForm() {
           name="description"
           rows={2}
           maxLength={2000}
-          className="w-full rounded-md px-3 py-2 text-sm surface"
+          className="w-full rounded-md px-3 py-2.5 text-sm surface"
           placeholder="A relay app for turning intentions into scheduled nudges."
         />
       </Field>
@@ -38,7 +38,7 @@ export function NewTopicForm() {
           name="goal"
           rows={2}
           maxLength={2000}
-          className="w-full rounded-md px-3 py-2 text-sm surface"
+          className="w-full rounded-md px-3 py-2.5 text-sm surface"
           placeholder="Ship a v1 that a stranger can onboard into in under two minutes."
         />
       </Field>

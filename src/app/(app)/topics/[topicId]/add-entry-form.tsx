@@ -36,7 +36,7 @@ export function AddEntryForm({ topicId, subtopics }: { topicId: string; subtopic
         required
         maxLength={300}
         placeholder="What happened, in one line"
-        className="w-full rounded-md px-3 py-2 text-sm surface"
+        className="w-full rounded-md px-3 py-2.5 text-sm surface"
       />
 
       <textarea
@@ -44,7 +44,7 @@ export function AddEntryForm({ topicId, subtopics }: { topicId: string; subtopic
         rows={3}
         maxLength={50_000}
         placeholder="Detail, reasoning, the prompt that worked, what broke…"
-        className="w-full rounded-md px-3 py-2 text-sm surface"
+        className="w-full rounded-md px-3 py-2.5 text-sm surface"
       />
 
       <div className="grid gap-2 sm:grid-cols-3">

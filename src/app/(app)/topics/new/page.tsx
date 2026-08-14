@@ -6,7 +6,7 @@ import { NewTopicForm } from './new-topic-form';
 export default function NewTopicPage() {
   return (
     <div className="mx-auto max-w-xl px-4 py-6 sm:px-6 lg:py-10">
-      <Link href="/topics" className="inline-flex items-center gap-1.5 text-sm muted hover:underline">
+      <Link href="/topics" className="inline-flex min-h-11 items-center gap-1.5 py-2 text-sm muted hover:underline">
         <ArrowLeft className="size-4" aria-hidden />
         Topics
       </Link>

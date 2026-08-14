@@ -34,7 +34,9 @@
  */
 
 import { chromium } from 'playwright';
+import { launchOptions } from './chromium-path.mjs';
 import { createClient } from '@supabase/supabase-js';
+import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -92,7 +94,7 @@ async function deleteUser(email) {
   if (u) await admin.auth.admin.deleteUser(u.id);
 }
 
-const browser = await chromium.launch();
+const browser = await chromium.launch(launchOptions());
 let exitCode = 0;
 
 try {
@@ -112,37 +114,58 @@ try {
   await a.fill('input[name="name"]', TOPIC);
   await a.fill('textarea[name="description"], input[name="description"]', 'Created by hosted validation.');
   await a.fill('textarea[name="goal"], input[name="goal"]', 'Prove Phase 1 persistence end to end.');
-  await a.click('button[type="submit"]');
-  await a.waitForLoadState('networkidle');
+  // The create action ends in a server-side redirect to /topics/<id>.
+  // networkidle can settle before that lands, so wait for the URL itself.
+  await Promise.all([
+    a.waitForURL(/\/topics\/[0-9a-f-]{36}/, { timeout: 30_000 }).catch(() => {}),
+    a.click('button[type="submit"]'),
+  ]);
   const topicUrl = a.url();
   record('topic created through the UI', /\/topics\/[0-9a-f-]{36}/.test(topicUrl), topicUrl.replace(BASE, ''));
   const topicId = (topicUrl.match(/\/topics\/([0-9a-f-]{36})/) ?? [])[1] ?? null;
+  if (!topicId) throw new Error('topic was not created; cannot exercise its children');
 
   // --- H. Nested subtopics --------------------------------------------------
   heading('H. Nested subtopics');
+  // Scope every click to the form that owns the field, so a submit cannot be
+  // routed to a different form on the same page.
+  const subtopicForm = 'form:has(input[name="name"])';
   let nested = false;
   try {
-    await a.fill('input[name="name"]', 'Branding');
-    await a.click('button[type="submit"]');
+    await a.fill(`${subtopicForm} input[name="name"]`, 'Branding');
+    await a.click(`${subtopicForm} button[type="submit"]`);
     await a.waitForLoadState('networkidle');
-    nested = (await a.content()).includes('Branding');
-  } catch { /* form shape differs; reported below */ }
-  record('subtopic added', nested, nested ? 'Branding' : 'no subtopic form on the topic page');
+    nested = (await a.content()).includes('Branding') && /\/topics\/[0-9a-f-]{36}/.test(a.url());
+  } catch { /* reported below */ }
+  record('subtopic added', nested, nested ? 'Branding' : 'subtopic form not found on the topic page');
 
   // --- I. Knowledge entries -------------------------------------------------
   heading('I. Knowledge entries');
+  // The entry form is the one carrying the hidden topicId.
+  const entryForm = 'form:has(input[name="topicId"])';
+  const wanted = [
+    ['Use approach A', 'decision', 'claude_code'],
+    ['Ship the icon set', 'progress', 'claude_chat'],
+  ];
   let entries = 0;
-  for (const [title, type] of [['Use approach A', 'decision'], ['Ship the icon set', 'progress']]) {
+  for (const [title, type, source] of wanted) {
     try {
-      await a.fill('input[name="title"]', title);
-      const sel = await a.$('select[name="knowledgeType"]');
-      if (sel) await sel.selectOption(type).catch(() => {});
-      await a.click('form:has(input[name="title"]) button[type="submit"]');
-      await a.waitForLoadState('networkidle');
-      if ((await a.content()).includes(title)) entries += 1;
+      await a.fill(`${entryForm} input[name="title"]`, title);
+      await a.fill(`${entryForm} textarea[name="content"]`, `Recorded by hosted validation: ${title}.`);
+      await a.selectOption(`${entryForm} select[name="knowledgeType"]`, type).catch(() => {});
+      await a.selectOption(`${entryForm} select[name="sourceType"]`, source).catch(() => {});
+      await a.click(`${entryForm} button[type="submit"]`);
+      // The action revalidates in place rather than navigating, so wait for the
+      // entry itself to appear instead of for a load event.
+      await a.waitForFunction(
+        (t) => document.body.innerText.includes(t),
+        title,
+        { timeout: 20_000 },
+      );
+      entries += 1;
     } catch { /* counted below */ }
   }
-  record('knowledge entries created', entries > 0, `${entries} of 2`);
+  record('knowledge entries created', entries === wanted.length, `${entries} of ${wanted.length}`);
 
   // --- C. Persists across a hard reload -------------------------------------
   heading('C. Persistence across a hard reload');
@@ -194,9 +217,34 @@ try {
   const outPath = resolve(ROOT, '.qa-session.json');
   writeFileSync(outPath, JSON.stringify(cookies), { mode: 0o600 });
   record('session cookies exported', authCookies.length > 0, `${authCookies.length} auth cookie(s) → .qa-session.json`);
-  console.log(`\n  Run authenticated QA with:\n    CONTEXTSHELF_QA_COOKIE="$(cat .qa-session.json)" npm run test:responsive -- ${BASE}\n`);
-
   await ctxA.close();
+
+  // Run the responsive audit here rather than leaving it to a follow-up
+  // command. The session belongs to a throwaway account that the cleanup below
+  // deletes, so a session handed to a later process is already invalid by the
+  // time that process uses it — which is exactly why the authenticated
+  // viewports have always reported as skipped.
+  if (authCookies.length && !process.env.CONTEXTSHELF_SKIP_QA) {
+    heading('L. Authenticated responsive QA');
+    const qa = spawnSync(
+      process.execPath,
+      [resolve(ROOT, 'scripts/responsive-qa.mjs'), BASE],
+      {
+        cwd: ROOT,
+        encoding: 'utf8',
+        env: { ...process.env, CONTEXTSHELF_QA_COOKIE: JSON.stringify(cookies) },
+      },
+    );
+    const out = `${qa.stdout ?? ''}${qa.stderr ?? ''}`;
+    for (const line of out.trim().split('\n')) console.log(`    ${line}`);
+    const audited = Number((out.match(/(\d+) page\/viewport combinations audited/) ?? [])[1] ?? 0);
+    const stillSkipped = Number((out.match(/(\d+) skipped/) ?? [])[1] ?? 0);
+    record(
+      'authenticated viewports audited',
+      qa.status === 0 && stillSkipped === 0 && audited >= 40,
+      `${audited} combinations, ${stillSkipped} skipped`,
+    );
+  }
 } catch (e) {
   record('validation run', false, e.message);
   exitCode = 1;

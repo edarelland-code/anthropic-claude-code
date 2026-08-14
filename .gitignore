@@ -18,3 +18,4 @@ Thumbs.db
 coverage/
 .supabase/
 supabase/.temp/
+.env*
