@@ -5,15 +5,15 @@
 > `docs/ARCHITECTURE.md`; setup and deployment live in `docs/DEPLOYMENT.md`.
 
 **Last updated:** 2026-08-14
-**Current phase:** Phase 3 — Capture & retrieval. **Complete.** Implemented, hosted-validated, and
-usable end to end through the interface.
+**Current phase:** Phase 4 — Continuation. **Complete.** Implemented, hosted-validated, and usable
+end to end through the interface.
 
-Phases 1 and 2 are closed and merged.
+Phases 1, 2 and 3 are closed and merged.
 
-Live at **<https://contextshelf.vercel.app>**, backed by Supabase `omhktzxwffaipmcoljic`, now
-carrying migrations `0003` and `0004` — still **26 tables**, now 4 views and 35 policies. Phase 3
-added no table: Phase 0 had already modelled the Inbox, Layer 1 evidence, file references, tags
-and the deletion log.
+Live at **<https://contextshelf.vercel.app>**, backed by Supabase `omhktzxwffaipmcoljic`, carrying
+migrations `0001`–`0004` — **26 tables**, 4 views, 35 policies. Phase 4 added **no migration at
+all**: `context_snapshots`, `resume_trigger_if/then` on both topics and subtopics, and the
+`context_density` enum were all modelled in Phase 0.
 
 ---
 
@@ -31,6 +31,81 @@ These terms mean exactly this and nothing more:
 | **Production validated** | Verified on the deployed URL against the hosted Supabase project |
 | **Cross-device validated** | The same account was verified on two physical machines |
 
+
+---
+
+## Phase 4 — Continuation
+
+### What Phase 0 and Phase 2 had already built
+
+The third audit in a row to find most of the phase already modelled. `context_snapshots` had
+`density`, `target`, `body`, `inputs jsonb`, topic and subtopic FKs, RLS and an index — that is
+Resume History. `resume_trigger_if` / `resume_trigger_then` existed on **both** `topics` and
+`subtopics`. `context_density` and `RESUME_TARGETS` existed. Phase 2 had left `assembleMemory()`,
+`avoidList()` and `prompt_current_winning` behind, which are the derivations Resume reuses rather
+than reinventing.
+
+**No migration was written.** Everything 4Q asks Resume History to record fits the existing
+columns plus `inputs` — size, sections, record ids, freshness, conflicts and an optional label.
+
+### The winning-prompt defect, found by the audit
+
+`TopicContext.winningPrompts` sorted each prompt's versions descending and took the first — the
+**newest**, not the winner. Rule 9a exists because those differ: the latest version is often a
+later experiment that did worse. Master Topic Memory rendered the wrong body, and a Resume built
+on it would have pasted a failed experiment into a fresh session under a heading saying it worked.
+
+Fixed by resolving through `prompt_current_winning`, in a pure `toWinningPrompts()` so the rule is
+testable without a database. `prompts.is_winning` is deliberately ignored — it is a derived
+boolean meaning "a winner exists somewhere", not which one.
+
+### The architecture
+
+`assembleResumeContext(input, options)` is pure and returns **structured data**. The three
+formatters are pure functions of that one object, so Chat, Cowork and Code are formatting profiles
+over one memory rather than three that can drift.
+
+The rule the user set is enforced by the type signature: the assembler takes records and a clock
+reading, and has **no parameter through which a `context_snapshots` row could arrive**. A past
+export therefore cannot become an input to the next one. `is_current` is written `false` and never
+read.
+
+| Selection rule | Why it is not the obvious thing |
+|---|---|
+| Meaningful changes are a projection, not the last N rows | The Inbox makes low-value capture cheap, so there is a lot of it. A resume full of "chatted about colours" tells a session nothing |
+| The avoid list is ranked, superseded decisions first | Compact has room for five. A superseded decision explains why the current direction exists, which prevents the most expensive mistake. An item with no reason is dropped, because "do not do X" without a why invites a session to find out by trying X |
+| The next action never promotes a blocker | A blocker says work is stopped, not what to do. Presenting it as the next action would tell a fresh session to do nothing |
+| No next action is invented when none is recorded | A fabricated task presented as stored truth is indistinguishable from a real one. The output says so plainly instead |
+| Compact skips the conflict scan | A warning it has no room to explain is worse than none |
+| Subtopic scope keeps topic-wide decisions and requirements | Work inside a subtopic is still governed by them, and a session that never saw them would cheerfully violate them |
+
+### Issues found and fixed
+
+| # | Severity | Issue | Fix |
+|---|---|---|---|
+| 40 | **High — would have exported the wrong prompt** | `TopicContext.winningPrompts` returned the newest version rather than the selected one | Resolve through `prompt_current_winning`; five regression assertions |
+| 41 | **Medium — a density that was only a label** | Compact's requirements section was uncapped, so a large topic produced a 3,798-token "compact" export — four times its intent | Requirements and blockers capped, with the omission recorded in `truncations` |
+| 42 | Medium | The Topic page issued two queries per prompt to fetch versions and the winner; the Prompts page issued one per prompt for the winner | `getContext` resolves both in its batched read; `listWithVersions` replaced the Prompts page loop |
+| 43 | Medium | `/topics/[id]` had never been in the responsive audit, so two real defects had gone unseen: a 20px "Edit current context" button and a 36px select | Both raised to 44px; the audit now takes run-time page ids from the harness that owns the session |
+| 44 | Medium | A blocked clipboard aborted the copy before the export was recorded, so history silently omitted it | The text is selected as a fallback and the export is recorded either way — clicking Copy is the act of taking the context |
+| 45 | Low | Resetting "copied" inside the regeneration effect caused a cascading render and briefly claimed Copied about text no longer shown | Derived from which document is on screen |
+| 46 | **Medium — a check that lied, in the other direction** | Hosted validation reported "the export is recorded in resume history — no row" twice. The recording was correct throughout: the button flips to Copied when the click is handled, and the server action that writes the row resolves afterwards, so the check was reading the database while the insert was still in flight. It would have failed a working feature, and issue 44 was fixed on the strength of it | The check waits for the confirmation the write returns, then polls for the row; the detail line now says whether the copy was ever acknowledged, so the next failure distinguishes "never clicked" from "not written". Issue 44's fix is kept — it is a real improvement, just not this cause |
+
+### Not done in Phase 4
+
+- **Relationship editing UI.** Deferred explicitly, as the brief allows. Resume traversal reads
+  edges that `supersede_entry()` and `supersede_decision()` write automatically, so manual linking
+  does not currently change what a Resume contains. Building an editor to justify a traversal that
+  already works would have widened the phase for nothing.
+- **AI-assisted compression.** Not needed: Compact is ~560 tokens on a real topic and stays under
+  2,000 on the 500-entry fixture. Adding a model dependency would break the offline guarantee
+  (4AI) for a problem that does not exist yet.
+
+### Search performance — review threshold recorded
+
+Phase 3's finding stands unchanged, as instructed (4AH). No leakproof marking, no definer search
+function. **Revisit when either** a typical authenticated search exceeds **250 ms**, **or** a
+workspace approaches **25,000–40,000 searchable records**. Measured today: 35 ms at 4,000 entries.
 
 ---
 
@@ -439,38 +514,51 @@ Phase 1's criteria all pass. These are honest gaps in *coverage*, not open crite
 
 ---
 
-## Test results (last run, 2026-08-14)
+## Test results (last run, 2026-08-14, end of Phase 4)
 
 | Suite | Result |
 |---|---|
-| `npm run build` | pass — 18 routes |
+| `npm run build` | pass — 21 routes |
 | `npm run typecheck` | pass |
 | `npm run lint` | pass, 0 warnings |
-| `npm run test` | **48 passed** / 5 files |
-| `npm run test:db` | **3 suites passed** against PostgreSQL 16.13, plus both hosted-script smoke tests |
-| `npm run schema:parity` | columns 291, enums 14, RLS 24, policies 31, indexes 60, constraints 139, triggers 17, functions 8 — all matching |
-| `hosted/01_verify_schema.sql` | **15/15 PASS** against `omhktzxwffaipmcoljic` |
-| `hosted/02_rls_isolation.sql` | **ALL HOSTED RLS CHECKS PASSED**, rolled back |
-| `npm run validate:hosted` | **16/16 checks pass** |
-| Authenticated responsive QA | **40 combinations, 0 skipped, no layout failures** |
+| `npm run test` | **163 passed** / 12 files |
+| `npm run test:db` | **7 suites passed** against PostgreSQL 16.13, plus both hosted-script smoke tests |
+| `npm run schema:parity` | columns 325, enums 14, RLS 26, policies 35, indexes 102, constraints 151, triggers 19, functions 17 — all matching |
+| `hosted/01_verify_schema.sql` | **26/26 PASS** against `omhktzxwffaipmcoljic` |
+| `hosted/02_rls_isolation.sql` | **ALL HOSTED RLS CHECKS PASSED**, rolled back — now including resume history |
+| `npm run validate:hosted` | **68/68 checks pass** |
+| Authenticated responsive QA | **100 combinations, 0 skipped, no layout failures** |
 | Cross-device acceptance test | **PASS** — Work PC ↔ Mac, both directions, by the account holder |
+
+Hosted data after validation: one workspace, one user, and the account holder's own
+`Cross-device test from Work PC` topic. Every QA account, topic and row the validator creates is
+deleted by its own cleanup — `context_snapshots`, `knowledge_entries`, `source_sessions` and
+`ingestion_records` are all empty.
 
 ---
 
 ## Next task
 
-**Phase 3 — Capture & retrieval.** Inbox, Quick Capture, full-text search, file/URL references,
-and transcript import. Exit criteria in `docs/ARCHITECTURE.md` §13.
+**Phase 5 — Claude Code integration.** `/api/ingest`, ingestion tokens, the git metadata model,
+hook scripts, and the MCP pathway. Exit criteria in `docs/ARCHITECTURE.md` §13: a real `git commit`
+in a real repository produces a real ContextShelf entry with no manual step.
 
-The Phase 2 gaps listed under "Not done in Phase 2" are the natural first candidates if any of
-them blocks daily use before Phase 3 work begins.
+Phase 4 left the receiving half of that already modelled — `code_context` on Resume renders
+repository, branch and recent Claude Code sessions from `source_sessions`, and reads empty rather
+than guessing when nothing has been captured. Phase 5 fills it.
+
+The items under "Not done in Phase 4" are the natural first candidates if any of them blocks daily
+use before Phase 5 work begins — relationship editing is the only one that limits what Resume can
+reach today.
 
 ## Resume trigger
 
 **IF** returning to ContextShelf development
-**THEN** Phases 1 and 2 are complete, validated, and merged. The hosted project and the deployment both
-exist and are proven, including cross-device continuity on two physical machines. Decisions, ideas, and prompts can be created,
-read, superseded, and evaluated through the interface, and the Timeline folds every source into
-one history. Begin Phase 3 on a `phase-3-capture` branch, and read "Not done in Phase 2" and
-"Carried into Phase 2" first — the email template limitation, the unwired realtime layer, and the
-missing supersede/lifecycle controls are all live constraints.
+**THEN** Phases 1–4 are complete, validated, and merged. The hosted project and the deployment
+both exist and are proven, including cross-device continuity on two physical machines. Capture,
+triage, search, files and recovery all work end to end, and a Topic or Subtopic now generates a
+continuation prompt that a fresh Claude session can start from — assembled deterministically from
+current records, with no model API and no second memory store. Begin Phase 5 on a
+`phase-5-claude-code` branch, and read "Not done in Phase 4" and the leakproof-limit note first —
+relationship editing, the unwired realtime layer, and the full-text scan-not-index behaviour under
+RLS are all live constraints.

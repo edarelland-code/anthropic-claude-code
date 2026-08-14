@@ -50,6 +50,21 @@ const PAGES = [
   { path: '/files', name: 'files', auth: true },
 ];
 
+/*
+ * Pages whose URL needs an id that only exists at run time — the Resume flow
+ * lives under a topic, and a subtopic Resume under one of its subtopics.
+ *
+ * The harness that owns the session (validate-hosted.mjs) knows those ids
+ * because it just created them, so it passes them in rather than this script
+ * guessing or, worse, these states going unaudited because the URL could not be
+ * constructed.
+ */
+for (const extra of JSON.parse(process.env.CONTEXTSHELF_QA_EXTRA_PAGES ?? '[]')) {
+  if (typeof extra?.path === 'string' && typeof extra?.name === 'string') {
+    PAGES.push({ path: extra.path, name: extra.name, auth: true });
+  }
+}
+
 const MIN_TOUCH = 40; // px; below this a control is awkward on a phone
 
 const failures = [];

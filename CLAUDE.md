@@ -170,6 +170,7 @@ npm run db:types     # regenerate adapter-internal DB types
 
 npm run provision            # the whole hosted sequence: link, migrate, verify, deploy
 npm run schema:parity        # hosted vs repository catalogs, without a Postgres connection
+npm run verify:hosted        # the two hosted SQL suites over the Management API (AD-15)
 npm run validate:hosted -- <url>   # auth, persistence, isolation, provenance, authenticated QA
 ```
 

@@ -41,6 +41,12 @@ import type { ResumeContext, ResumeInput, ResumeOptions } from './types';
 const CAPS = {
   compact: {
     decisions: 5,
+    // Requirements need their own cap, not just constraints. A mature topic
+    // accumulates dozens of them, and an uncapped section turned a "compact"
+    // export into 3,800 tokens on the large fixture — four times its intent,
+    // which would have made the density a label rather than a guarantee.
+    requirements: 5,
+    blockers: 5,
     constraints: 3,
     avoid: 5,
     changes: 3,
@@ -56,6 +62,8 @@ const CAPS = {
   },
   standard: {
     decisions: Number.POSITIVE_INFINITY,
+    requirements: 20,
+    blockers: Number.POSITIVE_INFINITY,
     constraints: Number.POSITIVE_INFINITY,
     avoid: 10,
     changes: 10,
@@ -71,6 +79,8 @@ const CAPS = {
   },
   full_audit: {
     decisions: Number.POSITIVE_INFINITY,
+    requirements: Number.POSITIVE_INFINITY,
+    blockers: Number.POSITIVE_INFINITY,
     constraints: Number.POSITIVE_INFINITY,
     avoid: Number.POSITIVE_INFINITY,
     changes: 50,
@@ -249,7 +259,8 @@ export function assembleResumeContext(
           prompts: input.prompts,
         });
 
-  const requirements = ofType('requirement');
+  const allRequirements = ofType('requirement');
+  const requirements = allRequirements.slice(0, caps.requirements);
   const constraints = ofType('important_context').slice(0, caps.constraints);
   const completedWork = ofType('implementation', 'added', 'refactored', 'fix').slice(
     0,
@@ -288,6 +299,8 @@ export function assembleResumeContext(
   note('recentChanges', recentChanges.length, buildRecentMeaningfulChanges({ entries, decisions, limit: Number.POSITIVE_INFINITY }).length);
   note('winningPrompts', winningPrompts.length, input.prompts.filter((p) => p.version !== null).length);
   note('completedWork', completedWork.length, ofType('implementation', 'added', 'refactored', 'fix').length);
+  note('requirements', requirements.length, allRequirements.length);
+  note('blockers', Math.min(caps.blockers, open.filter((a) => a.kind === 'blocker').length), open.filter((a) => a.kind === 'blocker').length);
 
   return {
     scope: { topic: input.topic, subtopic },
@@ -313,7 +326,7 @@ export function assembleResumeContext(
     completedWork,
     recentChanges,
     winningPrompts,
-    blockers: open.filter((a) => a.kind === 'blocker'),
+    blockers: open.filter((a) => a.kind === 'blocker').slice(0, caps.blockers),
     openQuestions: open.filter((a) => a.kind === 'question'),
     remainingWork: open
       .filter((a) => a.kind === 'next_step')

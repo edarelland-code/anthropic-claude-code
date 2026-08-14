@@ -75,7 +75,7 @@ export function CurrentStateForm({
         <button
           type="button"
           onClick={() => setEditing(true)}
-          className="inline-flex items-center gap-1.5 text-sm text-indigo-600 hover:underline dark:text-indigo-400"
+          className="inline-flex min-h-11 items-center gap-1.5 text-sm text-indigo-600 hover:underline dark:text-indigo-400"
         >
           <Pencil className="size-3.5" aria-hidden />
           Edit current context

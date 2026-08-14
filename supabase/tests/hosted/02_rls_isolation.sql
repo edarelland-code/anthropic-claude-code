@@ -232,6 +232,39 @@ begin
   select count(*) into n from prompt_winning_selections;
   if n <> 0 then raise exception 'FAIL: B reads A''s winning selection rows'; end if;
 
+  -- --- Phase 4: resume history must not leak ---------------------------------
+  --
+  -- A resume export is the most concentrated record in the system: one row
+  -- containing a topic's goal, its current state, its decisions and its
+  -- rejected directions in readable prose. Leaking one leaks more than leaking
+  -- any single record would.
+  select count(*) into n from context_snapshots where workspace_id = a_ws;
+  if n <> 0 then
+    raise exception 'FAIL: B reads % of A''s resume exports', n;
+  end if;
+
+  select count(*) into n from context_snapshots where topic_id = a_topic;
+  if n <> 0 then raise exception 'FAIL: B reads A''s resume exports by topic'; end if;
+
+  select count(*) into n from context_snapshots;
+  if n <> 0 then
+    raise exception 'FAIL: an unfiltered read returns % resume exports to B', n;
+  end if;
+
+  -- The included record ids are as sensitive as the body: they enumerate what
+  -- A's topic contains even without the prose.
+  select count(*) into n from context_snapshots where inputs is not null;
+  if n <> 0 then raise exception 'FAIL: B reads the record ids inside A''s exports'; end if;
+
+  -- And B cannot write one against A's topic either, which would both corrupt
+  -- A's history and confirm the topic exists.
+  blocked := false;
+  begin
+    insert into context_snapshots (workspace_id, topic_id, user_id, density, target, body)
+    values (b_ws, a_topic, b_id, 'standard', 'claude_chat', 'graffiti');
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'FAIL: B recorded a resume export against A''s topic'; end if;
+
   -- --- Phase 3: universal search must not leak -------------------------------
   --
   -- search_documents unions twelve tables, so it is the widest surface in the
@@ -271,6 +304,13 @@ begin
   if n = 0 then raise exception 'FAIL: A cannot see their own timeline'; end if;
   select count(*) into n from search_documents where topic_id = a_topic;
   if n = 0 then raise exception 'FAIL: A cannot search their own records'; end if;
+
+  -- A can record and read back their own resume export.
+  insert into context_snapshots (workspace_id, topic_id, user_id, density, target, body, inputs)
+  values (a_ws, a_topic, a_id, 'standard', 'claude_chat', 'A resume body',
+          jsonb_build_object('approxTokens', 500));
+  select count(*) into n from context_snapshots where topic_id = a_topic;
+  if n <> 1 then raise exception 'FAIL: A cannot read back their own resume export'; end if;
   execute 'reset role';
 
   -- --- A is untouched --------------------------------------------------------
@@ -286,7 +326,7 @@ begin
   execute 'reset role';
   perform set_config('request.jwt.claims', '', true);
 
-  raise notice 'ALL HOSTED RLS CHECKS PASSED, including the Phase 2 timeline and prompt views and the Phase 3 search projection (%)', procedure_note;
+  raise notice 'ALL HOSTED RLS CHECKS PASSED, including the Phase 2 timeline and prompt views, the Phase 3 search projection and the Phase 4 resume history (%)', procedure_note;
 end $$;
 
 select 'ALL HOSTED RLS CHECKS PASSED — nothing was persisted' as result;

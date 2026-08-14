@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState, useTransition } from 'react';
+import { useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import { AlertTriangle, Check, Copy, FileText, Loader2, RefreshCw } from 'lucide-react';
 
 import { CONTEXT_DENSITIES, RESUME_TARGETS, type ContextDensity, type ResumeTarget } from '@/lib/domain/types';
@@ -75,6 +75,7 @@ export function ResumeFlow({
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [recorded, setRecorded] = useState<{ key: string; message: string | null } | null>(null);
   const [pending, start] = useTransition();
+  const previewRef = useRef<HTMLPreElement>(null);
 
   const key = useMemo(
     () => `${subtopicId ?? ''}|${target}|${density}|${excluded.join(',')}`,
@@ -108,11 +109,27 @@ export function ResumeFlow({
 
   const copy = async () => {
     if (!resume) return;
+
+    // The clipboard API is unavailable in some browsers and denied in others.
+    // When it fails the text is selected instead, so the user can still take
+    // it with one keystroke — and the export is still recorded, because
+    // clicking Copy IS the act of taking the context. A history that silently
+    // omitted an export whenever the clipboard misbehaved would be worse than
+    // one that occasionally records an export the user abandoned.
+    let viaClipboard = true;
     try {
       await navigator.clipboard.writeText(resume.markdown);
     } catch {
-      setError('The clipboard is not available in this browser. Select the text below and copy it.');
-      return;
+      viaClipboard = false;
+      const pre = previewRef.current;
+      if (pre) {
+        const range = document.createRange();
+        range.selectNodeContents(pre);
+        const selection = window.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+      }
+      setError('The clipboard is blocked in this browser. The context below is selected — press ⌘/Ctrl + C.');
     }
     setCopiedKey(key);
 
@@ -133,7 +150,10 @@ export function ResumeFlow({
       freshness: resume.freshness.level,
       conflicts: resume.conflicts.length,
     });
-    setRecorded({ key, message: state.error ?? state.message ?? null });
+    setRecorded({
+      key,
+      message: state.error ?? (viaClipboard ? state.message : 'Recorded. Press ⌘/Ctrl + C to copy the selected text.') ?? null,
+    });
   };
 
   return (
@@ -304,7 +324,10 @@ export function ResumeFlow({
                 Reset sections
               </button>
             </h2>
-            <pre className="mt-2 max-h-[36rem] overflow-auto whitespace-pre-wrap break-words rounded-lg p-4 text-xs leading-6 surface">
+            <pre
+              ref={previewRef}
+              className="mt-2 max-h-[36rem] overflow-auto whitespace-pre-wrap break-words rounded-lg p-4 text-xs leading-6 surface"
+            >
               {resume.markdown}
             </pre>
           </section>
