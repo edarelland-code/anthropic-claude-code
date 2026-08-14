@@ -71,8 +71,31 @@ export const IDEA_STATUSES = [
 ] as const;
 export type IdeaStatus = (typeof IDEA_STATUSES)[number];
 
-export const DECISION_STATUSES = ['active', 'superseded', 'reversed', 'deprecated'] as const;
+/**
+ * `reversed` is a legacy value kept so existing rows stay readable; new writes
+ * use `rejected` for a direction that was turned down. `superseded` means
+ * something newer replaced it, which is a different fact and must not be
+ * conflated with rejection — the avoid-list depends on telling them apart.
+ */
+export const DECISION_STATUSES = [
+  'proposed',
+  'active',
+  'superseded',
+  'rejected',
+  'deprecated',
+  'archived',
+  'reversed',
+] as const;
 export type DecisionStatus = (typeof DECISION_STATUSES)[number];
+
+/** The statuses a user can choose. `superseded` is only ever set by superseding. */
+export const SELECTABLE_DECISION_STATUSES = [
+  'proposed',
+  'active',
+  'rejected',
+  'deprecated',
+  'archived',
+] as const satisfies readonly DecisionStatus[];
 
 export const PROMPT_RESULTS = [
   'untested',

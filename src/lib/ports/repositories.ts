@@ -10,6 +10,7 @@ import type {
   Action,
   ActionKind,
   Decision,
+  EntityType,
   FileReference,
   Idea,
   IngestionRecord,
@@ -17,6 +18,8 @@ import type {
   KnowledgeType,
   Prompt,
   PromptVersion,
+  Relationship,
+  RelationshipType,
   SourceSession,
   SourceType,
   Subtopic,
@@ -275,6 +278,43 @@ export interface InboxRepository {
   discard(id: string): Promise<void>;
 }
 
+/** One end of a relationship, resolved enough to render without a second query. */
+export interface RelatedRecord {
+  relationshipId: string;
+  relationshipType: RelationshipType;
+  /** 'outgoing' when the subject is the `from` side, 'incoming' when it is the `to` side. */
+  direction: 'outgoing' | 'incoming';
+  entityType: EntityType;
+  entityId: string;
+  title: string;
+  /** Null when the far side was soft-deleted; the edge survives, the label does not. */
+  status: string | null;
+  note: string | null;
+  createdAt: string;
+}
+
+/**
+ * The knowledge graph (AD-7).
+ *
+ * Supersession is NOT written through here. `superseded_by_id` on the row is
+ * authoritative for status, and `supersede_decision()` / `supersede_entry()`
+ * record the matching graph edge themselves. Writing one here as well would
+ * create a second path to the same fact, and the two would eventually disagree.
+ */
+export interface RelationshipRepository {
+  /** Every edge touching a record, in both directions, with the far side resolved. */
+  listFor(entityType: EntityType, entityId: string): Promise<RelatedRecord[]>;
+  link(input: {
+    fromType: EntityType;
+    fromId: string;
+    relationshipType: RelationshipType;
+    toType: EntityType;
+    toId: string;
+    note?: string | null;
+  }): Promise<Relationship>;
+  unlink(relationshipId: string): Promise<void>;
+}
+
 /** The single object handed to Server Components. */
 export interface DataContext {
   auth: AuthPort;
@@ -289,4 +329,5 @@ export interface DataContext {
   files: FileRepository;
   sessions: SourceSessionRepository;
   inbox: InboxRepository;
+  relationships: RelationshipRepository;
 }

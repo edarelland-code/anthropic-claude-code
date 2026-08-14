@@ -14,6 +14,7 @@ import type {
   Milestone,
   Prompt,
   PromptVersion,
+  Relationship,
   SourceSession,
   Subtopic,
   Topic,
@@ -259,5 +260,19 @@ export function toIngestionRecord(r: Row): IngestionRecord {
     createdEntryIds: strArray(r.created_entry_ids),
     createdAt: str(r.created_at),
     processedAt: nstr(r.processed_at),
+  };
+}
+
+export function toRelationship(r: Row): Relationship {
+  return {
+    id: str(r.id),
+    workspaceId: str(r.workspace_id),
+    fromType: str(r.from_type) as Relationship['fromType'],
+    fromId: str(r.from_id),
+    relationshipType: str(r.relationship_type) as Relationship['relationshipType'],
+    toType: str(r.to_type) as Relationship['toType'],
+    toId: str(r.to_id),
+    note: nstr(r.note),
+    createdAt: str(r.created_at),
   };
 }

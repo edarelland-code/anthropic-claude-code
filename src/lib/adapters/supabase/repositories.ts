@@ -3,6 +3,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type {
   Action,
   Decision,
+  EntityType,
   FileReference,
   Idea,
   IngestionRecord,
@@ -10,6 +11,7 @@ import type {
   Milestone,
   Prompt,
   PromptVersion,
+  Relationship,
   SourceSession,
   SourceType,
   Subtopic,
@@ -34,6 +36,8 @@ import {
   type InboxRepository,
   type KnowledgeRepository,
   type PromptRepository,
+  type RelatedRecord,
+  type RelationshipRepository,
   type SessionUser,
   type SourceSessionRepository,
   type SubtopicRepository,
@@ -919,6 +923,153 @@ class SupabaseInbox implements InboxRepository {
   }
 }
 
+/**
+ * The knowledge graph (AD-7).
+ *
+ * Reads resolve the far side of every edge so the UI can render a link without
+ * a query per row. Most record types are already resolved by `timeline_events`
+ * — reusing it means one projection defines "what is this record called" for
+ * both the Timeline and the graph, instead of two lists that drift. Topics,
+ * subtopics, and prompt heads are not timeline events, so they resolve directly.
+ */
+class SupabaseRelationships implements RelationshipRepository {
+  constructor(private readonly db: SupabaseClient) {}
+
+  async listFor(entityType: EntityType, entityId: string): Promise<RelatedRecord[]> {
+    const { data, error } = await this.db
+      .from('relationships')
+      .select('*')
+      .or(
+        `and(from_type.eq.${entityType},from_id.eq.${entityId}),` +
+          `and(to_type.eq.${entityType},to_id.eq.${entityId})`,
+      )
+      .order('created_at', { ascending: false });
+    if (error) throw new Error(`list relationships: ${error.message}`);
+
+    const edges = (data ?? []).map((r) => map.toRelationship(r as Row));
+    if (!edges.length) return [];
+
+    const wanted = edges.map((e) =>
+      e.fromType === entityType && e.fromId === entityId
+        ? { type: e.toType, id: e.toId, direction: 'outgoing' as const, edge: e }
+        : { type: e.fromType, id: e.fromId, direction: 'incoming' as const, edge: e },
+    );
+    const ids = [...new Set(wanted.map((w) => w.id))];
+
+    const labels = new Map<string, { title: string; status: string | null }>();
+    const absorb = (
+      rows: Row[] | null,
+      title: (r: Row) => string,
+      status: (r: Row) => string | null,
+    ) => {
+      for (const r of rows ?? []) {
+        const id = typeof r.id === 'string' ? r.id : null;
+        if (id && !labels.has(id)) labels.set(id, { title: title(r), status: status(r) });
+      }
+    };
+
+    const [tl, topics, subtopics, prompts] = await Promise.all([
+      this.db.from('timeline_events').select('id, title, status').in('id', ids),
+      this.db.from('topics').select('id, name, status').in('id', ids).is('deleted_at', null),
+      this.db.from('subtopics').select('id, name, status').in('id', ids).is('deleted_at', null),
+      this.db.from('prompts').select('id, title, is_winning').in('id', ids).is('deleted_at', null),
+    ]);
+    const s2 = (v: unknown) => (v == null ? null : String(v));
+    absorb(tl.data as Row[] | null, (r) => String(r.title ?? ''), (r) => s2(r.status));
+    absorb(topics.data as Row[] | null, (r) => String(r.name ?? ''), (r) => s2(r.status));
+    absorb(subtopics.data as Row[] | null, (r) => String(r.name ?? ''), (r) => s2(r.status));
+    absorb(prompts.data as Row[] | null, (r) => String(r.title ?? ''), (r) => (r.is_winning ? 'winning' : null));
+
+    return wanted.map((w) => {
+      // An edge can outlive the record it points at: a soft delete leaves the
+      // relationship in place. Say so rather than rendering a blank row.
+      const label = labels.get(w.id);
+      return {
+        relationshipId: w.edge.id,
+        relationshipType: w.edge.relationshipType,
+        direction: w.direction,
+        entityType: w.type,
+        entityId: w.id,
+        title: label?.title || '(deleted or unavailable)',
+        status: label?.status ?? null,
+        note: w.edge.note,
+        createdAt: w.edge.createdAt,
+      };
+    });
+  }
+
+  async link(input: {
+    fromType: EntityType;
+    fromId: string;
+    relationshipType: Relationship['relationshipType'];
+    toType: EntityType;
+    toId: string;
+    note?: string | null;
+  }): Promise<Relationship> {
+    const { data: userData } = await this.db.auth.getUser();
+    if (!userData.user) throw new Error('not signed in');
+    if (input.fromType === input.toType && input.fromId === input.toId) {
+      throw new Error('A record cannot be related to itself.');
+    }
+    if (input.relationshipType === 'supersedes') {
+      // Supersession is owned by supersede_decision() / supersede_entry(),
+      // which set the authoritative FK and write this edge themselves. Creating
+      // one here would produce an edge with no matching FK behind it.
+      throw new Error('Supersession is recorded by superseding, not by linking.');
+    }
+
+    const workspaceId = await this.workspaceOf(input.fromType, input.fromId);
+    const row = unwrap(
+      await this.db
+        .from('relationships')
+        .insert({
+          workspace_id: workspaceId,
+          user_id: userData.user.id,
+          from_type: input.fromType,
+          from_id: input.fromId,
+          relationship_type: input.relationshipType,
+          to_type: input.toType,
+          to_id: input.toId,
+          note: input.note ?? null,
+        })
+        .select('*')
+        .single(),
+      'create relationship',
+    );
+    return map.toRelationship(row);
+  }
+
+  async unlink(relationshipId: string): Promise<void> {
+    // An edge is an assertion about two other records, not history in its own
+    // right, so a wrong one is removed rather than tombstoned. Both endpoints
+    // are untouched.
+    const { error } = await this.db.from('relationships').delete().eq('id', relationshipId);
+    if (error) throw new Error(`remove relationship: ${error.message}`);
+  }
+
+  /** The workspace a record belongs to, so the edge is scoped like its endpoints. */
+  private async workspaceOf(type: EntityType, id: string): Promise<string> {
+    const table: Partial<Record<EntityType, string>> = {
+      topic: 'topics',
+      subtopic: 'subtopics',
+      knowledge_entry: 'knowledge_entries',
+      decision: 'decisions',
+      idea: 'ideas',
+      prompt: 'prompts',
+      prompt_version: 'prompt_versions',
+      file_reference: 'file_references',
+      action: 'actions',
+      milestone: 'milestones',
+      source_session: 'source_sessions',
+    };
+    const from = table[type];
+    if (!from) throw new Error(`unknown entity type ${type}`);
+    const { data, error } = await this.db.from(from).select('workspace_id').eq('id', id).single();
+    if (error) throw new Error(`resolve workspace: ${error.message}`);
+    return String((data as Row).workspace_id);
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 export function createDataContext(db: SupabaseClient): DataContext {
@@ -935,6 +1086,7 @@ export function createDataContext(db: SupabaseClient): DataContext {
     files: new SupabaseFiles(db),
     sessions: new SupabaseSessions(db),
     inbox: new SupabaseInbox(db),
+    relationships: new SupabaseRelationships(db),
   };
 }
 

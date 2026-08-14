@@ -1,0 +1,215 @@
+-- Phase 2: the timeline_events projection and decision supersession.
+--
+-- Two things are proven here, and the first is a security property:
+--
+--   1. timeline_events does not leak across workspaces. A view runs as its
+--      OWNER unless created with security_invoker, and an owner-run view reads
+--      straight past row-level security on every table beneath it. That failure
+--      is silent — the view works perfectly and quietly serves one user's
+--      history to another — so it is asserted rather than assumed.
+--
+--   2. supersede_decision() preserves both decisions, refuses to run without a
+--      reason, and leaves exactly one of the pair active.
+
+begin;
+
+do $$
+declare
+  a_id uuid; b_id uuid;
+  a_ws uuid; b_ws uuid;
+  a_topic uuid; a_sub uuid;
+  a_entry uuid; a_decision uuid; a_decision2 uuid; a_idea uuid;
+  a_prompt uuid; a_version uuid; a_action uuid; a_milestone uuid; a_file uuid;
+  n int;
+  blocked boolean;
+  kinds text[];
+begin
+  insert into auth.users (email) values ('tl-a@example.test') returning id into a_id;
+  insert into auth.users (email) values ('tl-b@example.test') returning id into b_id;
+  select id into a_ws from workspaces where owner_id = a_id;
+  select id into b_ws from workspaces where owner_id = b_id;
+  perform t.assert(a_ws is not null and b_ws is not null, 'bootstrap did not create workspaces');
+
+  perform t.login(a_id);
+
+  insert into topics (workspace_id, user_id, name, slug, goal)
+  values (a_ws, a_id, 'DailyRelay', 'dailyrelay', 'Ship v1') returning id into a_topic;
+
+  insert into subtopics (workspace_id, topic_id, user_id, name, slug)
+  values (a_ws, a_topic, a_id, 'Branding', 'branding') returning id into a_sub;
+
+  insert into knowledge_entries (workspace_id, topic_id, user_id, knowledge_type, title, content, source_type)
+  values (a_ws, a_topic, a_id, 'progress', 'Shipped the icon set', 'private detail', 'claude_code')
+  returning id into a_entry;
+  insert into entry_subtopics (knowledge_entry_id, subtopic_id) values (a_entry, a_sub);
+
+  insert into decisions (workspace_id, topic_id, subtopic_id, user_id, title, decision, reason, status)
+  values (a_ws, a_topic, a_sub, a_id, 'Blue icon', 'Use a blue circle', 'Matches the brand', 'active')
+  returning id into a_decision;
+
+  insert into ideas (workspace_id, topic_id, user_id, title, idea, status)
+  values (a_ws, a_topic, a_id, 'Add a checkmark', 'Overlay a check', 'rejected')
+  returning id into a_idea;
+
+  insert into prompts (workspace_id, topic_id, user_id, title, is_winning)
+  values (a_ws, a_topic, a_id, 'Icon prompt', true) returning id into a_prompt;
+  insert into prompt_versions (prompt_id, workspace_id, user_id, version, body, result)
+  values (a_prompt, a_ws, a_id, 1, 'secret prompt body', 'worked') returning id into a_version;
+  update prompts set current_version_id = a_version where id = a_prompt;
+
+  insert into actions (workspace_id, topic_id, user_id, kind, title)
+  values (a_ws, a_topic, a_id, 'blocker', 'Waiting on brand sign-off') returning id into a_action;
+
+  insert into milestones (workspace_id, topic_id, user_id, title, achieved_at)
+  values (a_ws, a_topic, a_id, 'v1 shipped', now()) returning id into a_milestone;
+
+  insert into file_references (workspace_id, topic_id, user_id, kind, path, display_name)
+  values (a_ws, a_topic, a_id, 'repo_file', 'src/icon.svg', 'icon.svg') returning id into a_file;
+
+  insert into source_sessions (workspace_id, user_id, topic_id, source_type, title, raw_content)
+  values (a_ws, a_id, a_topic, 'claude_chat', 'Icon chat', 'verbatim transcript');
+
+  -- --- 1. Every record type reaches the projection ------------------------
+  -- Eight, not nine: `prompts` is the mutable head and contributes no event of
+  -- its own; each prompt_version is the event.
+  select count(*) into n from timeline_events where topic_id = a_topic;
+  perform t.assert(n = 8, format('expected 8 timeline rows for the topic, found %s', n));
+
+  select array_agg(distinct entity_type::text order by entity_type::text)
+    into kinds from timeline_events where topic_id = a_topic;
+  perform t.assert(
+    kinds @> array['knowledge_entry','decision','idea','prompt_version','action','milestone','file_reference','source_session'],
+    format('timeline is missing record types: %s', kinds)
+  );
+
+  -- --- 2. Ordering is newest-first ----------------------------------------
+  perform t.assert(
+    (select bool_and(ok) from (
+      select occurred_at <= lag(occurred_at) over (order by occurred_at desc) is not false as ok
+      from timeline_events where topic_id = a_topic
+    ) s),
+    'timeline is not ordered newest-first by occurred_at'
+  );
+
+  -- --- 3. Subtopic filtering works for entries and for typed rows ---------
+  select count(*) into n from timeline_events
+   where topic_id = a_topic and a_sub = any(subtopic_ids);
+  -- the knowledge entry (via entry_subtopics) and the decision (via its column)
+  perform t.assert(n = 2, format('expected 2 rows under the subtopic, found %s', n));
+
+  -- --- 4. The winning prompt is labelled as such --------------------------
+  perform t.assert(
+    exists (select 1 from timeline_events where id = a_version and kind = 'winning_prompt'),
+    'the current version of a winning prompt is not labelled winning_prompt'
+  );
+
+  -- --- 5. Soft-deleted rows leave the projection --------------------------
+  update knowledge_entries set deleted_at = now() where id = a_entry;
+  perform t.assert(
+    not exists (select 1 from timeline_events where id = a_entry),
+    'a soft-deleted entry is still visible in the timeline'
+  );
+  update knowledge_entries set deleted_at = null where id = a_entry;
+
+  -- --- 6. THE SECURITY ASSERTION -----------------------------------------
+  -- User B must see nothing of A's, through the view, in either direction.
+  perform t.login(b_id);
+
+  select count(*) into n from timeline_events where topic_id = a_topic;
+  perform t.assert(n = 0, format('LEAK: user B sees %s of user A''s timeline rows', n));
+
+  select count(*) into n from timeline_events where workspace_id = a_ws;
+  perform t.assert(n = 0, 'LEAK: user B can read user A''s timeline by workspace');
+
+  select count(*) into n from timeline_events;
+  perform t.assert(n = 0, format('LEAK: an unfiltered timeline read returns %s rows for user B', n));
+
+  -- B's own workspace is reachable, so the view is not simply broken.
+  insert into topics (workspace_id, user_id, name, slug)
+  values (b_ws, b_id, 'B topic', 'b-topic');
+  insert into knowledge_entries (workspace_id, topic_id, user_id, knowledge_type, title)
+  select b_ws, id, b_id, 'progress', 'B entry' from topics where workspace_id = b_ws limit 1;
+  select count(*) into n from timeline_events;
+  perform t.assert(n = 1, format('user B should see exactly their own 1 row, saw %s', n));
+
+  -- --- 7. supersede_decision() -------------------------------------------
+  perform t.login(a_id);
+
+  insert into decisions (workspace_id, topic_id, user_id, title, decision, status)
+  values (a_ws, a_topic, a_id, 'Slash geometry', 'slash -> arrow -> X', 'proposed')
+  returning id into a_decision2;
+
+  -- A reason is mandatory.
+  blocked := false;
+  begin
+    perform supersede_decision(a_decision, a_decision2, '   ');
+  exception when others then blocked := true;
+  end;
+  perform t.assert(blocked, 'superseding a decision without a reason was allowed');
+
+  -- A decision cannot supersede itself.
+  blocked := false;
+  begin
+    perform supersede_decision(a_decision, a_decision, 'nonsense');
+  exception when others then blocked := true;
+  end;
+  perform t.assert(blocked, 'a decision was allowed to supersede itself');
+
+  perform supersede_decision(a_decision, a_decision2, 'Blue circle read as a status dot at 16px');
+
+  perform t.assert(
+    (select status from decisions where id = a_decision) = 'superseded',
+    'the old decision is not marked superseded'
+  );
+  perform t.assert(
+    (select superseded_by_id from decisions where id = a_decision) = a_decision2,
+    'the old decision does not point at its replacement'
+  );
+  perform t.assert(
+    (select supersede_reason from decisions where id = a_decision) is not null,
+    'the supersede reason was not recorded'
+  );
+  perform t.assert(
+    (select status from decisions where id = a_decision2) = 'active',
+    'the replacement decision was not promoted to active'
+  );
+
+  -- Both survive: history is preserved, Current State is the active one.
+  select count(*) into n from decisions where topic_id = a_topic and deleted_at is null;
+  perform t.assert(n = 2, format('expected both decisions to survive, found %s', n));
+  select count(*) into n from decisions
+   where topic_id = a_topic and status = 'active' and superseded_by_id is null;
+  perform t.assert(n = 1, format('expected exactly 1 active decision, found %s', n));
+
+  -- And the graph records the same fact (AD-7).
+  perform t.assert(
+    exists (
+      select 1 from relationships
+      where from_type = 'decision' and from_id = a_decision2
+        and relationship_type = 'supersedes'
+        and to_type = 'decision' and to_id = a_decision
+    ),
+    'supersession was not recorded in the relationship graph'
+  );
+
+  -- Superseding an already-superseded decision is refused.
+  blocked := false;
+  begin
+    perform supersede_decision(a_decision, a_decision2, 'again');
+  exception when others then blocked := true;
+  end;
+  perform t.assert(blocked, 'a decision was superseded twice');
+
+  -- --- 8. The CHECK constraint holds independently of the function --------
+  blocked := false;
+  begin
+    update decisions set superseded_by_id = a_decision2, supersede_reason = null
+     where id = a_decision2;
+  exception when others then blocked := true;
+  end;
+  perform t.assert(blocked, 'a decision was superseded with a null reason by direct UPDATE');
+
+  raise notice 'Timeline: all record types project, ordering holds, soft deletes drop out, and user B sees none of user A''s rows through the view. Decision supersession preserves both sides and requires a reason.';
+end $$;
+
+rollback;
