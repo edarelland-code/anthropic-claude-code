@@ -14,7 +14,9 @@ import type {
   Milestone,
   Prompt,
   PromptVersion,
+  Relationship,
   SourceSession,
+  TimelineEvent,
   Subtopic,
   Topic,
   Workspace,
@@ -259,5 +261,37 @@ export function toIngestionRecord(r: Row): IngestionRecord {
     createdEntryIds: strArray(r.created_entry_ids),
     createdAt: str(r.created_at),
     processedAt: nstr(r.processed_at),
+  };
+}
+
+export function toRelationship(r: Row): Relationship {
+  return {
+    id: str(r.id),
+    workspaceId: str(r.workspace_id),
+    fromType: str(r.from_type) as Relationship['fromType'],
+    fromId: str(r.from_id),
+    relationshipType: str(r.relationship_type) as Relationship['relationshipType'],
+    toType: str(r.to_type) as Relationship['toType'],
+    toId: str(r.to_id),
+    note: nstr(r.note),
+    createdAt: str(r.created_at),
+  };
+}
+
+export function toTimelineEvent(r: Row): TimelineEvent {
+  return {
+    id: str(r.id),
+    workspaceId: str(r.workspace_id),
+    topicId: str(r.topic_id),
+    subtopicIds: Array.isArray(r.subtopic_ids) ? (r.subtopic_ids as string[]) : [],
+    entityType: str(r.entity_type) as TimelineEvent['entityType'],
+    kind: str(r.kind),
+    title: str(r.title),
+    summary: nstr(r.summary),
+    sourceType: nstr(r.source_type) as TimelineEvent['sourceType'],
+    status: nstr(r.status),
+    supersededById: nstr(r.superseded_by_id),
+    occurredAt: str(r.occurred_at),
+    createdAt: str(r.created_at),
   };
 }

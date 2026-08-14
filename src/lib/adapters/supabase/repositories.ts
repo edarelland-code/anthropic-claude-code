@@ -3,6 +3,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type {
   Action,
   Decision,
+  EntityType,
   FileReference,
   Idea,
   IngestionRecord,
@@ -10,8 +11,11 @@ import type {
   Milestone,
   Prompt,
   PromptVersion,
+  Relationship,
   SourceSession,
   SourceType,
+  TimelineEvent,
+  TimelineQuery,
   Subtopic,
   Topic,
   TopicContext,
@@ -34,7 +38,10 @@ import {
   type InboxRepository,
   type KnowledgeRepository,
   type PromptRepository,
+  type RelatedRecord,
+  type RelationshipRepository,
   type SessionUser,
+  type TimelineRepository,
   type SourceSessionRepository,
   type SubtopicRepository,
   type TopicRepository,
@@ -45,6 +52,24 @@ import {
 import * as map from './mappers';
 
 type Row = Record<string, unknown>;
+
+/**
+ * Applies a version's current outcome over its stored columns.
+ *
+ * prompt_version_outcomes is authoritative; the columns on prompt_versions are
+ * the seed written when the version was created (migration 0002 §4).
+ */
+function overlay(version: Row, outcomes: Map<string, Row>): Row {
+  const o = outcomes.get(String(version.id));
+  if (!o) return version;
+  return {
+    ...version,
+    result: o.result,
+    rating: o.rating,
+    notes: o.notes ?? version.notes,
+    output_summary: o.output_summary ?? version.output_summary,
+  };
+}
 
 /** Phase gate: never silently no-op a write that is not built yet (CLAUDE.md rule 14). */
 class NotYetImplemented extends Error {
@@ -281,7 +306,7 @@ class SupabaseTopics implements TopicRepository {
         this.db.from('file_references').select('*').eq('topic_id', topicId).is('deleted_at', null),
         this.db.from('milestones').select('*').eq('topic_id', topicId).is('deleted_at', null),
         this.db.from('source_sessions').select('*').eq('topic_id', topicId).order('occurred_at', { ascending: false }),
-        this.db.from('prompts').select('*, prompt_versions(*)').eq('topic_id', topicId).is('deleted_at', null),
+        this.db.from('prompts').select('*, prompt_versions!prompt_versions_prompt_id_fkey(*)').eq('topic_id', topicId).is('deleted_at', null),
       ]);
 
     const timeline = ((entries.data ?? []) as Row[]).map(map.toEntry);
@@ -785,11 +810,129 @@ class SupabaseDecisions implements DecisionRepository {
     if (error) throw new Error(`list decisions: ${error.message}`);
     return (data ?? []).map((r) => map.toDecision(r as Row));
   }
-  async create(): Promise<Decision> {
-    throw new NotYetImplemented('Creating decisions', 2);
+  async getById(id: string): Promise<Decision | null> {
+    const { data, error } = await this.db.from('decisions').select('*').eq('id', id).maybeSingle();
+    if (error) throw new Error(`get decision: ${error.message}`);
+    return data ? map.toDecision(data as unknown as Row) : null;
   }
-  async supersede(): Promise<void> {
-    throw new NotYetImplemented('Superseding decisions', 2);
+
+  async create(input: {
+    topicId: string;
+    subtopicId?: string | null;
+    title: string;
+    decision: string;
+    reason?: string | null;
+    alternatives?: string[];
+    approvedDirection?: string | null;
+    status?: Decision['status'];
+    sourceType?: SourceType;
+    sourceSessionId?: string | null;
+  }): Promise<Decision> {
+    const { data: userData } = await this.db.auth.getUser();
+    if (!userData.user) throw new Error('not signed in');
+    const { data: topicRow, error: topicErr } = await this.db
+      .from('topics')
+      .select('workspace_id')
+      .eq('id', input.topicId)
+      .single();
+    if (topicErr) throw new Error(`create decision: ${topicErr.message}`);
+
+    const row = unwrap(
+      await this.db
+        .from('decisions')
+        .insert({
+          workspace_id: (topicRow as Row).workspace_id,
+          topic_id: input.topicId,
+          subtopic_id: input.subtopicId ?? null,
+          user_id: userData.user.id,
+          title: input.title.trim(),
+          decision: input.decision.trim(),
+          reason: input.reason ?? null,
+          // jsonb, so an empty list stays an empty list rather than becoming null.
+          alternatives: input.alternatives ?? [],
+          approved_direction: input.approvedDirection ?? null,
+          status: input.status ?? 'active',
+          source_type: input.sourceType ?? 'manual',
+          source_session_id: input.sourceSessionId ?? null,
+        })
+        .select('*')
+        .single(),
+      'create decision',
+    );
+
+    // A decision is a decision first; the entry exists so it appears in the
+    // Timeline with its provenance. The decision row stays authoritative for
+    // status, reason, alternatives, and supersession — those are never mirrored
+    // onto the entry, so there is nothing to keep in sync.
+    await this.mirrorToTimeline(row, input.topicId, userData.user.id, input.sourceType);
+
+    await this.db
+      .from('topics')
+      .update({ last_meaningful_update_at: new Date().toISOString() })
+      .eq('id', input.topicId);
+
+    return map.toDecision(row);
+  }
+
+  async setStatus(id: string, status: Decision['status']): Promise<Decision> {
+    if (status === 'superseded') {
+      // Reaching this state by hand would leave superseded_by_id null and break
+      // the pairing the ledger depends on.
+      throw new Error('A decision becomes superseded by superseding it, not by setting a status.');
+    }
+    const row = unwrap(
+      await this.db.from('decisions').update({ status }).eq('id', id).select('*').single(),
+      'update decision status',
+    );
+    return map.toDecision(row);
+  }
+
+  async supersede(input: { id: string; newDecisionId: string; reason: string }): Promise<void> {
+    if (!input.reason?.trim()) {
+      // The database enforces this too; failing here gives the user a sentence
+      // instead of a constraint violation.
+      throw new Error('A reason is required to supersede a decision.');
+    }
+    const { error } = await this.db.rpc('supersede_decision', {
+      p_old_decision_id: input.id,
+      p_new_decision_id: input.newDecisionId,
+      p_reason: input.reason.trim(),
+    });
+    if (error) throw new Error(`supersede decision: ${error.message}`);
+  }
+
+  /** Creates the knowledge entry that carries this decision into the Timeline. */
+  private async mirrorToTimeline(
+    row: Row,
+    topicId: string,
+    userId: string,
+    sourceType?: SourceType,
+  ): Promise<void> {
+    const { data: entry } = await this.db
+      .from('knowledge_entries')
+      .insert({
+        workspace_id: row.workspace_id,
+        topic_id: topicId,
+        user_id: userId,
+        knowledge_type: 'decision',
+        title: row.title,
+        content: row.decision,
+        source_type: sourceType ?? 'manual',
+      })
+      .select('id')
+      .single();
+
+    if (!entry) return;
+    const entryId = String((entry as Row).id);
+    await this.db
+      .from('decisions')
+      .update({ knowledge_entry_id: entryId })
+      .eq('id', row.id as string);
+    if (row.subtopic_id) {
+      await this.db
+        .from('entry_subtopics')
+        .insert({ knowledge_entry_id: entryId, subtopic_id: row.subtopic_id });
+    }
   }
 }
 
@@ -805,27 +948,117 @@ class SupabaseIdeas implements IdeaRepository {
     if (error) throw new Error(`list ideas: ${error.message}`);
     return (data ?? []).map((r) => map.toIdea(r as Row));
   }
-  async create(): Promise<Idea> {
-    throw new NotYetImplemented('Creating ideas', 2);
+  async getById(id: string): Promise<Idea | null> {
+    const { data, error } = await this.db.from('ideas').select('*').eq('id', id).maybeSingle();
+    if (error) throw new Error(`get idea: ${error.message}`);
+    return data ? map.toIdea(data as unknown as Row) : null;
   }
-  async setStatus(): Promise<Idea> {
-    throw new NotYetImplemented('Idea lifecycle changes', 2);
+
+  async create(input: {
+    topicId: string;
+    subtopicId?: string | null;
+    title: string;
+    idea?: string | null;
+    rationale?: string | null;
+    status?: Idea['status'];
+    sourceType?: SourceType;
+    sourceSessionId?: string | null;
+  }): Promise<Idea> {
+    const { data: userData } = await this.db.auth.getUser();
+    if (!userData.user) throw new Error('not signed in');
+    const { data: topicRow, error: topicErr } = await this.db
+      .from('topics')
+      .select('workspace_id')
+      .eq('id', input.topicId)
+      .single();
+    if (topicErr) throw new Error(`create idea: ${topicErr.message}`);
+
+    const row = unwrap(
+      await this.db
+        .from('ideas')
+        .insert({
+          workspace_id: (topicRow as Row).workspace_id,
+          topic_id: input.topicId,
+          subtopic_id: input.subtopicId ?? null,
+          user_id: userData.user.id,
+          title: input.title.trim(),
+          idea: input.idea ?? null,
+          rationale: input.rationale ?? null,
+          status: input.status ?? 'suggested',
+          source_type: input.sourceType ?? 'manual',
+          source_session_id: input.sourceSessionId ?? null,
+        })
+        .select('*')
+        .single(),
+      'create idea',
+    );
+    return map.toIdea(row);
+  }
+
+  /**
+   * Moves an idea through its lifecycle.
+   *
+   * A rejected idea keeps its rationale and stays queryable: that is what feeds
+   * the avoid-list, and it is the whole reason a rejected idea is not deleted
+   * (CLAUDE.md rule 9). `note` is appended to the rationale rather than
+   * replacing it, so the original reasoning survives the status change.
+   */
+  async setStatus(id: string, status: Idea['status'], note?: string): Promise<Idea> {
+    const patch: Row = { status };
+    if (note?.trim()) {
+      const { data: existing } = await this.db
+        .from('ideas')
+        .select('rationale')
+        .eq('id', id)
+        .maybeSingle();
+      const previous = (existing as Row | null)?.rationale;
+      const prefix = typeof previous === 'string' && previous.trim() ? `${previous}\n\n` : '';
+      patch.rationale = `${prefix}[${status}] ${note.trim()}`;
+    }
+    const row = unwrap(
+      await this.db.from('ideas').update(patch).eq('id', id).select('*').single(),
+      'update idea status',
+    );
+    return map.toIdea(row);
+  }
+
+  /** Records that an idea became a decision, without duplicating either. */
+  async linkDecision(ideaId: string, decisionId: string | null): Promise<Idea> {
+    const row = unwrap(
+      await this.db
+        .from('ideas')
+        .update({ decision_id: decisionId })
+        .eq('id', ideaId)
+        .select('*')
+        .single(),
+      'link idea to decision',
+    );
+    return map.toIdea(row);
   }
 }
 
 class SupabasePrompts implements PromptRepository {
   constructor(private readonly db: SupabaseClient) {}
+  // prompt_versions reaches prompts through two foreign keys — the plain one
+  // and the composite workspace key AD-11 requires — so an unqualified embed is
+  // ambiguous and PostgREST refuses it outright. Naming the constraint pins the
+  // path and stays correct as more keys are added.
   async listForTopic(topicId: string): Promise<Array<{ prompt: Prompt; current: PromptVersion | null }>> {
     const { data, error } = await this.db
       .from('prompts')
-      .select('*, prompt_versions(*)')
+      .select('*, prompt_versions!prompt_versions_prompt_id_fkey(*)')
       .eq('topic_id', topicId)
       .is('deleted_at', null);
     if (error) throw new Error(`list prompts: ${error.message}`);
-    return (data ?? []).map((r) => {
-      const row = r as Row;
+    const rows = (data ?? []) as Row[];
+    const outcomes = await this.outcomesFor(
+      rows.flatMap((r) => (Array.isArray(r.prompt_versions) ? (r.prompt_versions as Row[]) : [])),
+    );
+    return rows.map((row) => {
       const versions = Array.isArray(row.prompt_versions)
-        ? (row.prompt_versions as Row[]).map(map.toPromptVersion).sort((a, b) => b.version - a.version)
+        ? (row.prompt_versions as Row[])
+            .map((v) => map.toPromptVersion(overlay(v, outcomes)))
+            .sort((a, b) => b.version - a.version)
         : [];
       return { prompt: map.toPrompt(row), current: versions[0] ?? null };
     });
@@ -833,28 +1066,333 @@ class SupabasePrompts implements PromptRepository {
   async getWithVersions(id: string): Promise<{ prompt: Prompt; versions: PromptVersion[] } | null> {
     const { data, error } = await this.db
       .from('prompts')
-      .select('*, prompt_versions(*)')
+      .select('*, prompt_versions!prompt_versions_prompt_id_fkey(*)')
       .eq('id', id)
       .maybeSingle();
     if (error) throw new Error(`get prompt: ${error.message}`);
     if (!data) return null;
     const row = data as unknown as Row;
-    const versions = Array.isArray(row.prompt_versions)
-      ? (row.prompt_versions as Row[]).map(map.toPromptVersion).sort((a, b) => b.version - a.version)
-      : [];
+    const raw = Array.isArray(row.prompt_versions) ? (row.prompt_versions as Row[]) : [];
+    const outcomes = await this.outcomesFor(raw);
+    const versions = raw
+      .map((v) => map.toPromptVersion(overlay(v, outcomes)))
+      .sort((a, b) => b.version - a.version);
     return { prompt: map.toPrompt(row), versions };
   }
-  async create(): Promise<{ prompt: Prompt; version: PromptVersion }> {
-    throw new NotYetImplemented('Creating prompts', 2);
+  async create(input: {
+    topicId: string;
+    subtopicId?: string | null;
+    title: string;
+    body: string;
+    purpose?: string | null;
+    sourceType?: SourceType;
+  }): Promise<{ prompt: Prompt; version: PromptVersion }> {
+    const { data: userData } = await this.db.auth.getUser();
+    if (!userData.user) throw new Error('not signed in');
+    const { data: topicRow, error: topicErr } = await this.db
+      .from('topics')
+      .select('workspace_id')
+      .eq('id', input.topicId)
+      .single();
+    if (topicErr) throw new Error(`create prompt: ${topicErr.message}`);
+    const workspaceId = (topicRow as Row).workspace_id;
+
+    const promptRow = unwrap(
+      await this.db
+        .from('prompts')
+        .insert({
+          workspace_id: workspaceId,
+          topic_id: input.topicId,
+          subtopic_id: input.subtopicId ?? null,
+          user_id: userData.user.id,
+          title: input.title.trim(),
+          purpose: input.purpose ?? null,
+          source_type: input.sourceType ?? 'manual',
+        })
+        .select('*')
+        .single(),
+      'create prompt',
+    );
+
+    const versionRow = unwrap(
+      await this.db
+        .from('prompt_versions')
+        .insert({
+          prompt_id: promptRow.id,
+          workspace_id: workspaceId,
+          user_id: userData.user.id,
+          version: 1,
+          body: input.body,
+          result: 'untested',
+        })
+        .select('*')
+        .single(),
+      'create prompt version',
+    );
+
+    const withCurrent = unwrap(
+      await this.db
+        .from('prompts')
+        .update({ current_version_id: versionRow.id })
+        .eq('id', promptRow.id as string)
+        .select('*')
+        .single(),
+      'set current prompt version',
+    );
+
+    await this.recordOutcome({
+      versionId: String(versionRow.id),
+      workspaceId: String(workspaceId),
+      userId: userData.user.id,
+      result: 'untested',
+    });
+
+    return { prompt: map.toPrompt(withCurrent), version: await this.withCurrentOutcome(versionRow) };
   }
-  async addVersion(): Promise<PromptVersion> {
-    throw new NotYetImplemented('Prompt versioning', 2);
+
+  /**
+   * Appends a version. Never touches an existing one.
+   *
+   * prompt_versions has SELECT and INSERT policies and no UPDATE or DELETE, so
+   * "a previous prompt is never overwritten" is a database guarantee rather
+   * than a promise this method makes (CLAUDE.md rule 6). The version number is
+   * derived from the current maximum; the UNIQUE(prompt_id, version) constraint
+   * turns a concurrent double-append into an error rather than a lost version.
+   */
+  async addVersion(input: {
+    promptId: string;
+    body: string;
+    notes?: string | null;
+    result?: PromptVersion['result'];
+  }): Promise<PromptVersion> {
+    const { data: userData } = await this.db.auth.getUser();
+    if (!userData.user) throw new Error('not signed in');
+
+    const { data: promptRow, error: promptErr } = await this.db
+      .from('prompts')
+      .select('workspace_id')
+      .eq('id', input.promptId)
+      .single();
+    if (promptErr) throw new Error(`add prompt version: ${promptErr.message}`);
+
+    const { data: latest } = await this.db
+      .from('prompt_versions')
+      .select('version')
+      .eq('prompt_id', input.promptId)
+      .order('version', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const next = Number((latest as Row | null)?.version ?? 0) + 1;
+
+    const row = unwrap(
+      await this.db
+        .from('prompt_versions')
+        .insert({
+          prompt_id: input.promptId,
+          workspace_id: (promptRow as Row).workspace_id,
+          user_id: userData.user.id,
+          version: next,
+          body: input.body,
+          notes: input.notes ?? null,
+          result: input.result ?? 'untested',
+        })
+        .select('*')
+        .single(),
+      'add prompt version',
+    );
+
+    // Seed the outcome so the outcomes table is complete for every version.
+    // Without this, "newest outcome row" would have to fall back to the version
+    // columns, and a rule of the form "this column unless that table has a row"
+    // is exactly the ambiguity the separate table exists to avoid.
+    await this.recordOutcome({
+      versionId: String(row.id),
+      workspaceId: String((promptRow as Row).workspace_id),
+      userId: userData.user.id,
+      result: input.result ?? 'untested',
+      notes: input.notes ?? null,
+    });
+
+    await this.db
+      .from('prompts')
+      .update({ current_version_id: row.id })
+      .eq('id', input.promptId);
+
+    return this.withCurrentOutcome(row);
   }
-  async rateVersion(): Promise<PromptVersion> {
-    throw new NotYetImplemented('Prompt rating', 2);
+
+  /**
+   * Records how a version performed, by appending an outcome.
+   *
+   * prompt_versions stays insert-only (rule 6), so this never touches the
+   * version row. Re-rating appends again and the newest row wins, which keeps
+   * "I thought it worked, then found it only partly did" as history rather than
+   * overwriting the earlier judgement.
+   */
+  async rateVersion(input: {
+    versionId: string;
+    result: PromptVersion['result'];
+    rating?: number;
+    notes?: string | null;
+    outputSummary?: string | null;
+  }): Promise<PromptVersion> {
+    if (input.rating !== undefined && (input.rating < 1 || input.rating > 5)) {
+      throw new Error('A rating must be between 1 and 5.');
+    }
+    const { data: userData } = await this.db.auth.getUser();
+    if (!userData.user) throw new Error('not signed in');
+
+    const { data: versionRow, error: versionErr } = await this.db
+      .from('prompt_versions')
+      .select('*')
+      .eq('id', input.versionId)
+      .single();
+    if (versionErr) throw new Error(`rate prompt version: ${versionErr.message}`);
+
+    await this.recordOutcome({
+      versionId: input.versionId,
+      workspaceId: String((versionRow as Row).workspace_id),
+      userId: userData.user.id,
+      result: input.result,
+      rating: input.rating,
+      notes: input.notes,
+      outputSummary: input.outputSummary,
+    });
+
+    return this.withCurrentOutcome(versionRow as Row);
   }
-  async markWinning(): Promise<void> {
-    throw new NotYetImplemented('Marking winning prompts', 2);
+
+  /** Current outcomes for a set of versions, keyed by version id. */
+  private async outcomesFor(versions: Row[]): Promise<Map<string, Row>> {
+    const ids = versions.map((v) => String(v.id)).filter(Boolean);
+    if (!ids.length) return new Map();
+    const { data } = await this.db
+      .from('prompt_version_current_outcome')
+      .select('*')
+      .in('prompt_version_id', ids);
+    return new Map(
+      ((data ?? []) as Row[]).map((o) => [String(o.prompt_version_id), o]),
+    );
+  }
+
+  /** Appends an outcome row. The newest row for a version is its result. */
+  private async recordOutcome(input: {
+    versionId: string;
+    workspaceId: string;
+    userId: string;
+    result: PromptVersion['result'];
+    rating?: number;
+    notes?: string | null;
+    outputSummary?: string | null;
+  }): Promise<void> {
+    const { error } = await this.db.from('prompt_version_outcomes').insert({
+      prompt_version_id: input.versionId,
+      workspace_id: input.workspaceId,
+      user_id: input.userId,
+      result: input.result,
+      rating: input.rating ?? null,
+      notes: input.notes ?? null,
+      output_summary: input.outputSummary ?? null,
+    });
+    if (error) throw new Error(`record prompt outcome: ${error.message}`);
+  }
+
+  /**
+   * Overlays a version row with its current outcome.
+   *
+   * The outcome table is authoritative; the columns on prompt_versions are the
+   * seed written at creation and are not read once an outcome row exists.
+   */
+  private async withCurrentOutcome(versionRow: Row): Promise<PromptVersion> {
+    const { data } = await this.db
+      .from('prompt_version_current_outcome')
+      .select('*')
+      .eq('prompt_version_id', versionRow.id as string)
+      .maybeSingle();
+    const outcome = data as Row | null;
+    if (!outcome) return map.toPromptVersion(versionRow);
+    return map.toPromptVersion({
+      ...versionRow,
+      result: outcome.result,
+      rating: outcome.rating,
+      notes: outcome.notes ?? versionRow.notes,
+      output_summary: outcome.output_summary ?? versionRow.output_summary,
+    });
+  }
+
+  /**
+   * Designates one version as the winner, or clears the designation.
+   *
+   * Winning belongs to a version, not a prompt: "which prompt text produced the
+   * best result" is unanswerable at prompt level once there is more than one
+   * version. Selections append, so an earlier winner stays readable, and
+   * `prompts.is_winning` is kept in step by a trigger — derived, never written
+   * here (migration 0002 §5).
+   */
+  async markWinning(input: {
+    promptId: string;
+    versionId: string | null;
+    reason?: string | null;
+  }): Promise<void> {
+    const { data: userData } = await this.db.auth.getUser();
+    if (!userData.user) throw new Error('not signed in');
+    const { data: promptRow, error: promptErr } = await this.db
+      .from('prompts')
+      .select('workspace_id')
+      .eq('id', input.promptId)
+      .single();
+    if (promptErr) throw new Error(`mark winning prompt: ${promptErr.message}`);
+
+    const { error } = await this.db.from('prompt_winning_selections').insert({
+      prompt_id: input.promptId,
+      prompt_version_id: input.versionId,
+      workspace_id: (promptRow as Row).workspace_id,
+      user_id: userData.user.id,
+      reason: input.reason ?? null,
+    });
+    if (error) throw new Error(`mark winning prompt: ${error.message}`);
+  }
+
+  /** The winning version and its exact body — what "Copy Winning Prompt" copies. */
+  async getWinning(promptId: string): Promise<{
+    versionId: string;
+    version: number;
+    body: string;
+    reason: string | null;
+    selectedAt: string;
+  } | null> {
+    const { data, error } = await this.db
+      .from('prompt_current_winning')
+      .select('*')
+      .eq('prompt_id', promptId)
+      .maybeSingle();
+    if (error) throw new Error(`get winning prompt: ${error.message}`);
+    if (!data) return null;
+    const row = data as Row;
+    return {
+      versionId: String(row.prompt_version_id),
+      version: Number(row.winning_version),
+      body: String(row.winning_body ?? ''),
+      reason: (row.reason as string | null) ?? null,
+      selectedAt: String(row.selected_at),
+    };
+  }
+
+  /** Every winning designation this prompt has had, newest first. */
+  async winningHistory(promptId: string): Promise<
+    Array<{ versionId: string | null; reason: string | null; createdAt: string }>
+  > {
+    const { data, error } = await this.db
+      .from('prompt_winning_selections')
+      .select('prompt_version_id, reason, created_at, seq')
+      .eq('prompt_id', promptId)
+      .order('seq', { ascending: false });
+    if (error) throw new Error(`winning history: ${error.message}`);
+    return ((data ?? []) as Row[]).map((r) => ({
+      versionId: (r.prompt_version_id as string | null) ?? null,
+      reason: (r.reason as string | null) ?? null,
+      createdAt: String(r.created_at),
+    }));
   }
 }
 
@@ -919,6 +1457,203 @@ class SupabaseInbox implements InboxRepository {
   }
 }
 
+/**
+ * The knowledge graph (AD-7).
+ *
+ * Reads resolve the far side of every edge so the UI can render a link without
+ * a query per row. Most record types are already resolved by `timeline_events`
+ * — reusing it means one projection defines "what is this record called" for
+ * both the Timeline and the graph, instead of two lists that drift. Topics,
+ * subtopics, and prompt heads are not timeline events, so they resolve directly.
+ */
+class SupabaseRelationships implements RelationshipRepository {
+  constructor(private readonly db: SupabaseClient) {}
+
+  async listFor(entityType: EntityType, entityId: string): Promise<RelatedRecord[]> {
+    const { data, error } = await this.db
+      .from('relationships')
+      .select('*')
+      .or(
+        `and(from_type.eq.${entityType},from_id.eq.${entityId}),` +
+          `and(to_type.eq.${entityType},to_id.eq.${entityId})`,
+      )
+      .order('created_at', { ascending: false });
+    if (error) throw new Error(`list relationships: ${error.message}`);
+
+    const edges = (data ?? []).map((r) => map.toRelationship(r as Row));
+    if (!edges.length) return [];
+
+    const wanted = edges.map((e) =>
+      e.fromType === entityType && e.fromId === entityId
+        ? { type: e.toType, id: e.toId, direction: 'outgoing' as const, edge: e }
+        : { type: e.fromType, id: e.fromId, direction: 'incoming' as const, edge: e },
+    );
+    const ids = [...new Set(wanted.map((w) => w.id))];
+
+    const labels = new Map<string, { title: string; status: string | null }>();
+    const absorb = (
+      rows: Row[] | null,
+      title: (r: Row) => string,
+      status: (r: Row) => string | null,
+    ) => {
+      for (const r of rows ?? []) {
+        const id = typeof r.id === 'string' ? r.id : null;
+        if (id && !labels.has(id)) labels.set(id, { title: title(r), status: status(r) });
+      }
+    };
+
+    const [tl, topics, subtopics, prompts] = await Promise.all([
+      this.db.from('timeline_events').select('id, title, status').in('id', ids),
+      this.db.from('topics').select('id, name, status').in('id', ids).is('deleted_at', null),
+      this.db.from('subtopics').select('id, name, status').in('id', ids).is('deleted_at', null),
+      this.db.from('prompts').select('id, title, is_winning').in('id', ids).is('deleted_at', null),
+    ]);
+    const s2 = (v: unknown) => (v == null ? null : String(v));
+    absorb(tl.data as Row[] | null, (r) => String(r.title ?? ''), (r) => s2(r.status));
+    absorb(topics.data as Row[] | null, (r) => String(r.name ?? ''), (r) => s2(r.status));
+    absorb(subtopics.data as Row[] | null, (r) => String(r.name ?? ''), (r) => s2(r.status));
+    absorb(prompts.data as Row[] | null, (r) => String(r.title ?? ''), (r) => (r.is_winning ? 'winning' : null));
+
+    return wanted.map((w) => {
+      // An edge can outlive the record it points at: a soft delete leaves the
+      // relationship in place. Say so rather than rendering a blank row.
+      const label = labels.get(w.id);
+      return {
+        relationshipId: w.edge.id,
+        relationshipType: w.edge.relationshipType,
+        direction: w.direction,
+        entityType: w.type,
+        entityId: w.id,
+        title: label?.title || '(deleted or unavailable)',
+        status: label?.status ?? null,
+        note: w.edge.note,
+        createdAt: w.edge.createdAt,
+      };
+    });
+  }
+
+  async link(input: {
+    fromType: EntityType;
+    fromId: string;
+    relationshipType: Relationship['relationshipType'];
+    toType: EntityType;
+    toId: string;
+    note?: string | null;
+  }): Promise<Relationship> {
+    const { data: userData } = await this.db.auth.getUser();
+    if (!userData.user) throw new Error('not signed in');
+    if (input.fromType === input.toType && input.fromId === input.toId) {
+      throw new Error('A record cannot be related to itself.');
+    }
+    if (input.relationshipType === 'supersedes') {
+      // Supersession is owned by supersede_decision() / supersede_entry(),
+      // which set the authoritative FK and write this edge themselves. Creating
+      // one here would produce an edge with no matching FK behind it.
+      throw new Error('Supersession is recorded by superseding, not by linking.');
+    }
+
+    const workspaceId = await this.workspaceOf(input.fromType, input.fromId);
+    const row = unwrap(
+      await this.db
+        .from('relationships')
+        .insert({
+          workspace_id: workspaceId,
+          user_id: userData.user.id,
+          from_type: input.fromType,
+          from_id: input.fromId,
+          relationship_type: input.relationshipType,
+          to_type: input.toType,
+          to_id: input.toId,
+          note: input.note ?? null,
+        })
+        .select('*')
+        .single(),
+      'create relationship',
+    );
+    return map.toRelationship(row);
+  }
+
+  async unlink(relationshipId: string): Promise<void> {
+    // An edge is an assertion about two other records, not history in its own
+    // right, so a wrong one is removed rather than tombstoned. Both endpoints
+    // are untouched.
+    const { error } = await this.db.from('relationships').delete().eq('id', relationshipId);
+    if (error) throw new Error(`remove relationship: ${error.message}`);
+  }
+
+  /** The workspace a record belongs to, so the edge is scoped like its endpoints. */
+  private async workspaceOf(type: EntityType, id: string): Promise<string> {
+    const table: Partial<Record<EntityType, string>> = {
+      topic: 'topics',
+      subtopic: 'subtopics',
+      knowledge_entry: 'knowledge_entries',
+      decision: 'decisions',
+      idea: 'ideas',
+      prompt: 'prompts',
+      prompt_version: 'prompt_versions',
+      file_reference: 'file_references',
+      action: 'actions',
+      milestone: 'milestones',
+      source_session: 'source_sessions',
+    };
+    const from = table[type];
+    if (!from) throw new Error(`unknown entity type ${type}`);
+    const { data, error } = await this.db.from(from).select('workspace_id').eq('id', id).single();
+    if (error) throw new Error(`resolve workspace: ${error.message}`);
+    return String((data as Row).workspace_id);
+  }
+}
+
+/**
+ * The unified Timeline.
+ *
+ * Everything is one query against `timeline_events`. Merging eight collections
+ * in TypeScript would need every page of every source loaded before the first
+ * row could be ordered, and would not paginate.
+ */
+class SupabaseTimeline implements TimelineRepository {
+  constructor(private readonly db: SupabaseClient) {}
+
+  async query(q: TimelineQuery): Promise<TimelineEvent[]> {
+    let sel = this.db.from('timeline_events').select('*');
+    if (q.workspaceId) sel = sel.eq('workspace_id', q.workspaceId);
+    if (q.topicId) sel = sel.eq('topic_id', q.topicId);
+    // subtopic_ids is an array so an entry under several subtopics matches
+    // each of them; `contains` is the array-aware equivalent of eq.
+    if (q.subtopicId) sel = sel.contains('subtopic_ids', [q.subtopicId]);
+    if (q.entityTypes?.length) sel = sel.in('entity_type', q.entityTypes);
+    if (q.kinds?.length) sel = sel.in('kind', q.kinds);
+    if (q.sourceTypes?.length) sel = sel.in('source_type', q.sourceTypes);
+    if (q.since) sel = sel.gte('occurred_at', q.since);
+    if (q.until) sel = sel.lte('occurred_at', q.until);
+
+    const limit = q.limit ?? 100;
+    const offset = q.offset ?? 0;
+    const { data, error } = await sel
+      .order('occurred_at', { ascending: false })
+      .range(offset, offset + limit - 1);
+    if (error) throw new Error(`timeline: ${error.message}`);
+    return ((data ?? []) as Row[]).map(map.toTimelineEvent);
+  }
+
+  async countsByKind(
+    q: Pick<TimelineQuery, 'workspaceId' | 'topicId' | 'subtopicId'>,
+  ): Promise<Record<string, number>> {
+    let sel = this.db.from('timeline_events').select('kind');
+    if (q.workspaceId) sel = sel.eq('workspace_id', q.workspaceId);
+    if (q.topicId) sel = sel.eq('topic_id', q.topicId);
+    if (q.subtopicId) sel = sel.contains('subtopic_ids', [q.subtopicId]);
+    const { data, error } = await sel;
+    if (error) throw new Error(`timeline counts: ${error.message}`);
+    const counts: Record<string, number> = {};
+    for (const row of (data ?? []) as Row[]) {
+      const kind = String(row.kind);
+      counts[kind] = (counts[kind] ?? 0) + 1;
+    }
+    return counts;
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 export function createDataContext(db: SupabaseClient): DataContext {
@@ -935,6 +1670,8 @@ export function createDataContext(db: SupabaseClient): DataContext {
     files: new SupabaseFiles(db),
     sessions: new SupabaseSessions(db),
     inbox: new SupabaseInbox(db),
+    relationships: new SupabaseRelationships(db),
+    timeline: new SupabaseTimeline(db),
   };
 }
 

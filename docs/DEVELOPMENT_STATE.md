@@ -5,17 +5,13 @@
 > `docs/ARCHITECTURE.md`; setup and deployment live in `docs/DEPLOYMENT.md`.
 
 **Last updated:** 2026-08-14
-**Current phase:** Phase 1 — Foundation. **COMPLETE.** All thirteen exit criteria pass, including
-the cross-device acceptance test on two physical machines.
+**Current phase:** Phase 2 — Memory. **Complete.** Implemented, hosted-validated, and creatable
+end-to-end through the interface. Merged to `main`.
 
-Live at **<https://contextshelf.vercel.app>**, backed by Supabase project `omhktzxwffaipmcoljic`.
+Phase 1 is closed and merged (see "Phase 1 — closed" below).
 
-**Phase 2 is unblocked.** Start it on a `phase-2-memory` branch.
-
-One limitation is carried forward rather than closed: the OTP email templates cannot be set on the
-free tier, so a sign-in link stays bound to the device that requested it. Cross-device *data*
-continuity is proven and unaffected; only the sign-in link is device-bound. See "Carried into
-Phase 2".
+Live at **<https://contextshelf.vercel.app>**, backed by Supabase `omhktzxwffaipmcoljic`, now
+carrying migration `0002` — 26 tables, 3 views, 35 policies.
 
 ---
 
@@ -33,9 +29,77 @@ These terms mean exactly this and nothing more:
 | **Production validated** | Verified on the deployed URL against the hosted Supabase project |
 | **Cross-device validated** | The same account was verified on two physical machines |
 
+
 ---
 
-## Where Phase 1 stands — CLOSED
+## Phase 2 — Memory
+
+### What Phase 0 had already built
+
+The audit found that Phase 0 modelled the entire Phase 2 schema: `decisions`, `ideas`, `prompts`,
+`prompt_versions`, `relationships`, and `context_snapshots` all existed with the right columns, and
+`idea_status` already carried the exact six lifecycle states. Phase 1 left the write methods as
+`NotYetImplemented` stubs rather than faking them. Phase 2 was therefore mostly a wire-up, not a
+rebuild, and migration `0002` is additive: it creates one table plus one more for winning
+selections, and drops nothing.
+
+### Schema changes (0002)
+
+| Change | Why |
+|---|---|
+| `decision_status` gains `proposed`, `rejected`, `archived` | The ledger needs a pre-settled state, a turned-down state distinct from superseded, and a filing state. `reversed` is kept — dropping an enum value is destructive |
+| `supersede_decision()` + a CHECK | Rule 7 was unenforced for decisions: the columns existed with neither function nor constraint, so a decision could be superseded with a null reason |
+| `timeline_events` view | The unified Timeline, `security_invoker = true` |
+| `prompt_version_outcomes` | Append-only ratings, so rule 6 stands |
+| `prompt_winning_selections` | Winning identifies a VERSION; history of winner changes survives |
+| Indexes | Timeline ordering, supersession lookups in both directions |
+
+### Design decisions recorded
+
+- **AD-17** — derived read models are views with `security_invoker`, never materialised tables.
+- **AD-18** — judgements about a record are appended, never written onto it.
+- **Rule 6 restated** to name all four history tables.
+- **Rule 9a added** — winning identifies a version, and `prompts.is_winning` is derived by trigger.
+
+### Issues found and fixed
+
+| # | Severity | Issue | Fix |
+|---|---|---|---|
+| 20 | **High — would have leaked** | A view runs as its OWNER unless `security_invoker` is set, reading past RLS on every underlying table. Verified by removing it against a scratch cluster: user B then saw all 8 of user A's rows | `security_invoker = true` on all three views, asserted locally and on hosted |
+| 21 | **High — silent regression** | `prompt_winning_selections` gave PostgREST a second relationship path between `prompts` and `prompt_versions`, so the implicit embed became ambiguous and every prompt read threw. The Topic page failed to render, and with it the forms — subtopics and entries stopped persisting | Embeds name the constraint: `prompt_versions!prompt_versions_prompt_id_fkey` |
+| 22 | Medium | Outcome ordering used `created_at`, but `now()` is fixed for a whole transaction, so two outcomes recorded together tied and "newest" degraded to comparing random uuids | Identity sequence, also immune to clock skew |
+| 23 | **Medium — a check that lied** | `schema-parity.mjs` applied only `0001`, hardcoded, so it compared hosted against a stale reference and reported all 61 new objects as differences | Applies every migration in order |
+| 24 | Medium | Touch targets of 16px on Timeline links at 390/375 | `min-h-11` on both link types |
+| 25 | Low | A Home note promised Phase 2 features that now exist | Rewritten to name only what is still absent |
+| 26 | **Medium — invisible failure** | Several forms on the Topic page carry an input named `title`, so an unscoped fill in the validator populated a different form and left the real one's required field empty. The browser blocked submission silently: no error, no row, and a page-content assertion would have seen the title text and passed | Every fill scoped to its own form. Caught only by the database assertion — the same class of failure AD-16 exists for |
+| 27 | Low | Topic links on the three section pages were 16px. They passed earlier only because those pages had no data to render | `min-h-11` on all five |
+
+### Creation forms
+
+Phase 2 is not finished until each object can be created through the interface — repository
+support plus a read-only screen is not "Decisions work". One controlled disclosure group on the
+Topic workspace holds all three forms: opening a second closes the first, and the open panel takes
+full width, so the page gains a row rather than three permanently-open forms. The global sections
+reuse the same forms behind a topic picker rather than keeping their own copies, because every
+memory object belongs to a topic (rule 1) and three copies would mean three places to change a
+field.
+
+The prompt form's outcome is the part worth care: it appends to `prompt_version_outcomes` and is
+never written onto the version, so `prompt_versions` stays insert-only.
+
+### Not done in Phase 2
+
+- **`rateVersion` UI beyond creation.** An outcome can be set when a prompt is saved; re-rating an
+  existing version has no screen yet, though the repository method and its tests exist.
+- **Relationship editing UI.** `RelationshipRepository` reads and writes; nothing exposes linking.
+- **Supersede and lifecycle controls.** Superseding a decision and moving an idea through its
+  lifecycle work at the repository and database level, with tests, but have no buttons.
+
+These are named rather than mocked (rule 14).
+
+---
+
+## Phase 1 — closed
 
 | # | Exit criterion | Status | Evidence |
 |---|---|---|---|
@@ -239,18 +303,18 @@ Phase 1's criteria all pass. These are honest gaps in *coverage*, not open crite
 
 ## Next task
 
-**Phase 2 — Memory.** Start on a `phase-2-memory` branch. Phase 1 is closed and merged to `main`;
-`main` builds, typechecks, lints, and passes both test suites.
+**Phase 3 — Capture & retrieval.** Inbox, Quick Capture, full-text search, file/URL references,
+and transcript import. Exit criteria in `docs/ARCHITECTURE.md` §13.
 
-Exit criteria for Phase 2 are in `docs/ARCHITECTURE.md` §13. Do not modify a Phase 1 guarantee
-without recording the supersession here, per the process at the bottom of `CLAUDE.md`.
-
----
+The Phase 2 gaps listed under "Not done in Phase 2" are the natural first candidates if any of
+them blocks daily use before Phase 3 work begins.
 
 ## Resume trigger
 
 **IF** returning to ContextShelf development
-**THEN** Phase 1 is complete, validated, and merged. The hosted project and the deployment both
-exist and are proven, including cross-device continuity on two physical machines. Begin Phase 2 on
-a `phase-2-memory` branch, and read "Carried into Phase 2" above before planning — the email
-template limitation and the unwired realtime layer are both live constraints.
+**THEN** Phases 1 and 2 are complete, validated, and merged. The hosted project and the deployment both
+exist and are proven, including cross-device continuity on two physical machines. Decisions, ideas, and prompts can be created,
+read, superseded, and evaluated through the interface, and the Timeline folds every source into
+one history. Begin Phase 3 on a `phase-3-capture` branch, and read "Not done in Phase 2" and
+"Carried into Phase 2" first — the email template limitation, the unwired realtime layer, and the
+missing supersede/lifecycle controls are all live constraints.

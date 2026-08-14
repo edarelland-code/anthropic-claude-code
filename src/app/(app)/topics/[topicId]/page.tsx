@@ -3,7 +3,10 @@ import { notFound } from 'next/navigation';
 import { ArrowLeft, CircleAlert, Scale, Sparkles } from 'lucide-react';
 
 import { KnowledgeChip, Progress, SourceBadge, StatusPill } from '@/components/ui/badges';
+import { CreateMemoryActions } from '@/components/topics/create-forms';
+import { MasterMemory } from '@/components/topics/master-memory';
 import { getData } from '@/lib/data';
+import { assembleMemory } from '@/lib/resume/memory';
 import { formatDayHeading } from '@/lib/utils';
 import { freshness, groupByDay } from '@/lib/utils';
 
@@ -22,6 +25,35 @@ export default async function TopicPage({ params }: { params: Promise<{ topicId:
   if (!ctx) notFound();
 
   const { topic, subtopics, counts, currentEntries, timeline, activeDecisions, openActions } = ctx;
+
+  // Master Topic Memory is derived on every read (AD-8), so it cannot drift
+  // from the records beneath it. The winning VERSION is resolved per prompt —
+  // the latest version is often a later experiment that did worse.
+  const prompts = await data.prompts.listForTopic(topicId);
+  const promptsWithWinners = await Promise.all(
+    prompts.map(async ({ prompt }) => {
+      const full = await data.prompts.getWithVersions(prompt.id);
+      const winning = await data.prompts.getWinning(prompt.id);
+      return {
+        prompt,
+        versions: full?.versions ?? [],
+        winningVersionId: winning?.versionId ?? null,
+        winningReason: winning?.reason ?? null,
+      };
+    }),
+  );
+  const memory = assembleMemory({
+    topic,
+    subtopics,
+    entries: timeline,
+    decisions: [...ctx.activeDecisions, ...ctx.supersededDecisions],
+    ideas: ctx.rejectedIdeas,
+    prompts: promptsWithWinners,
+    actions: openActions,
+    files: ctx.files,
+    sessions: ctx.sessions,
+    milestones: ctx.milestones,
+  });
   const fresh = freshness(topic.lastMeaningfulUpdateAt);
   const nextStep = openActions.find((a) => a.kind === 'next_step') ?? null;
   const days = groupByDay(timeline, (e) => e.occurredAt);
@@ -120,6 +152,16 @@ export default async function TopicPage({ params }: { params: Promise<{ topicId:
 
           {/* Capture */}
           <section className="rounded-lg p-4 surface">
+            <h2 className="text-sm font-semibold">Record</h2>
+            <p className="mt-1 text-xs muted">
+              A decision, an idea, or a prompt. One panel at a time.
+            </p>
+            <div className="mt-3">
+              <CreateMemoryActions topicId={topic.id} subtopics={subtopics} />
+            </div>
+          </section>
+
+          <section className="rounded-lg p-4 surface">
             <h2 className="text-sm font-semibold">Add knowledge</h2>
             <p className="mt-1 text-sm muted">
               Typed entries, not generic notes. Source is recorded as metadata.
@@ -208,6 +250,8 @@ export default async function TopicPage({ params }: { params: Promise<{ topicId:
               ))}
             </dl>
           </section>
+
+          <MasterMemory memory={memory} />
 
           {counts.sessions === 0 && (
             <p className="flex gap-2 rounded-lg p-3.5 text-xs leading-5 muted surface">

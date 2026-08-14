@@ -10,15 +10,22 @@ import type {
   Action,
   ActionKind,
   Decision,
+  DecisionStatus,
+  EntityType,
   FileReference,
   Idea,
+  IdeaStatus,
   IngestionRecord,
   KnowledgeEntry,
   KnowledgeType,
   Prompt,
   PromptVersion,
+  Relationship,
+  RelationshipType,
   SourceSession,
   SourceType,
+  TimelineEvent,
+  TimelineQuery,
   Subtopic,
   Topic,
   TopicContext,
@@ -171,6 +178,7 @@ export interface KnowledgeRepository {
 
 export interface DecisionRepository {
   listForTopic(topicId: string): Promise<Decision[]>;
+  getById(id: string): Promise<Decision | null>;
   create(input: {
     topicId: string;
     subtopicId?: string | null;
@@ -179,9 +187,17 @@ export interface DecisionRepository {
     reason?: string | null;
     alternatives?: string[];
     approvedDirection?: string | null;
+    status?: DecisionStatus;
     sourceType?: SourceType;
     sourceSessionId?: string | null;
   }): Promise<Decision>;
+  /**
+   * Moves a decision between the states a user can choose. `superseded` is not
+   * one of them — that state exists only as the result of `supersede()`, which
+   * also sets the pointer the ledger reads.
+   */
+  setStatus(id: string, status: DecisionStatus): Promise<Decision>;
+  /** `reason` is required — CLAUDE.md rule 7, enforced here and in the database. */
   supersede(input: { id: string; newDecisionId: string; reason: string }): Promise<void>;
 }
 
@@ -193,10 +209,21 @@ export interface IdeaRepository {
     title: string;
     idea?: string | null;
     rationale?: string | null;
+    /** Where in the lifecycle it starts. Defaults to `suggested`. */
+    status?: IdeaStatus;
     sourceType?: SourceType;
     sourceSessionId?: string | null;
   }): Promise<Idea>;
-  setStatus(id: string, status: Idea['status'], note?: string): Promise<Idea>;
+  getById(id: string): Promise<Idea | null>;
+  /**
+   * Moves an idea through its lifecycle. `note` is APPENDED to the rationale,
+   * never substituted for it — a rejected idea has to keep both why it was
+   * suggested and why it was turned down, or the avoid-list loses half its
+   * value (rule 9).
+   */
+  setStatus(id: string, status: IdeaStatus, note?: string): Promise<Idea>;
+  /** Records that an idea became a decision, without copying either into the other. */
+  linkDecision(ideaId: string, decisionId: string | null): Promise<Idea>;
 }
 
 export interface PromptRepository {
@@ -217,13 +244,36 @@ export interface PromptRepository {
     notes?: string | null;
     result?: PromptVersion['result'];
   }): Promise<PromptVersion>;
+  /**
+   * Appends an outcome. Never mutates the version — re-rating adds a row, so a
+   * changed judgement is history rather than an overwrite (migration 0002 §4).
+   */
   rateVersion(input: {
     versionId: string;
     result: PromptVersion['result'];
     rating?: number;
     notes?: string | null;
+    outputSummary?: string | null;
   }): Promise<PromptVersion>;
-  markWinning(promptId: string, isWinning: boolean): Promise<void>;
+  /**
+   * Designates the exact winning version, or clears it with `versionId: null`.
+   *
+   * Source of truth is the append-only selection history; `prompts.is_winning`
+   * is derived from it by a trigger and must never be written directly.
+   */
+  markWinning(input: { promptId: string; versionId: string | null; reason?: string | null }): Promise<void>;
+  /** The winning version and its exact body — what "Copy Winning Prompt" copies. */
+  getWinning(promptId: string): Promise<{
+    versionId: string;
+    version: number;
+    body: string;
+    reason: string | null;
+    selectedAt: string;
+  } | null>;
+  /** Every winning designation this prompt has had, newest first. */
+  winningHistory(promptId: string): Promise<
+    Array<{ versionId: string | null; reason: string | null; createdAt: string }>
+  >;
 }
 
 export interface ActionRepository {
@@ -275,6 +325,57 @@ export interface InboxRepository {
   discard(id: string): Promise<void>;
 }
 
+/**
+ * The unified Timeline.
+ *
+ * Backed by the `timeline_events` projection, so ordering and filtering happen
+ * once in the database rather than by merging eight collections in the app.
+ * The projection is security_invoker, so row-level security on the underlying
+ * tables — not this repository — decides what a caller can see.
+ */
+export interface TimelineRepository {
+  query(q: TimelineQuery): Promise<TimelineEvent[]>;
+  /** Totals per filter group, for the counts beside each filter chip. */
+  countsByKind(q: Pick<TimelineQuery, 'workspaceId' | 'topicId' | 'subtopicId'>): Promise<Record<string, number>>;
+}
+
+/** One end of a relationship, resolved enough to render without a second query. */
+export interface RelatedRecord {
+  relationshipId: string;
+  relationshipType: RelationshipType;
+  /** 'outgoing' when the subject is the `from` side, 'incoming' when it is the `to` side. */
+  direction: 'outgoing' | 'incoming';
+  entityType: EntityType;
+  entityId: string;
+  title: string;
+  /** Null when the far side was soft-deleted; the edge survives, the label does not. */
+  status: string | null;
+  note: string | null;
+  createdAt: string;
+}
+
+/**
+ * The knowledge graph (AD-7).
+ *
+ * Supersession is NOT written through here. `superseded_by_id` on the row is
+ * authoritative for status, and `supersede_decision()` / `supersede_entry()`
+ * record the matching graph edge themselves. Writing one here as well would
+ * create a second path to the same fact, and the two would eventually disagree.
+ */
+export interface RelationshipRepository {
+  /** Every edge touching a record, in both directions, with the far side resolved. */
+  listFor(entityType: EntityType, entityId: string): Promise<RelatedRecord[]>;
+  link(input: {
+    fromType: EntityType;
+    fromId: string;
+    relationshipType: RelationshipType;
+    toType: EntityType;
+    toId: string;
+    note?: string | null;
+  }): Promise<Relationship>;
+  unlink(relationshipId: string): Promise<void>;
+}
+
 /** The single object handed to Server Components. */
 export interface DataContext {
   auth: AuthPort;
@@ -289,4 +390,6 @@ export interface DataContext {
   files: FileRepository;
   sessions: SourceSessionRepository;
   inbox: InboxRepository;
+  relationships: RelationshipRepository;
+  timeline: TimelineRepository;
 }

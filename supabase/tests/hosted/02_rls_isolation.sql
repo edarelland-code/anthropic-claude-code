@@ -195,6 +195,53 @@ begin
 
   execute 'reset role';
 
+  -- --- Phase 2: the timeline projection must not leak ------------------------
+  --
+  -- timeline_events is a view. A view runs as its OWNER unless created with
+  -- security_invoker, and an owner-run view reads straight past row-level
+  -- security on every table beneath it — serving one workspace's entire history
+  -- to another, silently, while appearing to work perfectly. This is the
+  -- assertion that catches that, on the real project rather than a local shim.
+  perform set_config('request.jwt.claims',
+    json_build_object('sub', b_id, 'role', 'authenticated')::text, true);
+  execute 'set local role authenticated';
+
+  select count(*) into n from timeline_events where topic_id = a_topic;
+  if n <> 0 then
+    raise exception 'FAIL: B sees % of A''s timeline rows through timeline_events', n;
+  end if;
+
+  select count(*) into n from timeline_events where workspace_id = a_ws;
+  if n <> 0 then raise exception 'FAIL: B reads A''s timeline by workspace'; end if;
+
+  -- An unfiltered read must return B's own rows and nothing else. Asserting
+  -- zero here would be wrong — B has their own topic in this fixture — and
+  -- would hide the real question, which is whether any row belongs to A.
+  select count(*) into n from timeline_events where workspace_id <> b_ws;
+  if n <> 0 then
+    raise exception 'FAIL: an unfiltered timeline read returns % foreign rows for B', n;
+  end if;
+
+  -- The two Phase 2 outcome views are held to the same standard.
+  select count(*) into n from prompt_version_current_outcome;
+  if n <> 0 then raise exception 'FAIL: B reads A''s prompt outcomes'; end if;
+  select count(*) into n from prompt_current_winning;
+  if n <> 0 then raise exception 'FAIL: B reads A''s winning prompt selections'; end if;
+  select count(*) into n from prompt_version_outcomes;
+  if n <> 0 then raise exception 'FAIL: B reads A''s prompt outcome rows'; end if;
+  select count(*) into n from prompt_winning_selections;
+  if n <> 0 then raise exception 'FAIL: B reads A''s winning selection rows'; end if;
+
+  execute 'reset role';
+
+  -- A still sees their own timeline, so the view is not simply broken.
+  perform set_config('request.jwt.claims',
+    json_build_object('sub', a_id, 'role', 'authenticated')::text, true);
+  execute 'set local role authenticated';
+  select count(*) into n from timeline_events where topic_id = a_topic;
+  if n = 0 then raise exception 'FAIL: A cannot see their own timeline'; end if;
+  execute 'reset role';
+
   -- --- A is untouched --------------------------------------------------------
   perform set_config('request.jwt.claims',
     json_build_object('sub', a_id, 'role', 'authenticated')::text, true);
@@ -208,7 +255,7 @@ begin
   execute 'reset role';
   perform set_config('request.jwt.claims', '', true);
 
-  raise notice 'ALL HOSTED RLS CHECKS PASSED (%)', procedure_note;
+  raise notice 'ALL HOSTED RLS CHECKS PASSED, including the Phase 2 timeline and prompt views (%)', procedure_note;
 end $$;
 
 select 'ALL HOSTED RLS CHECKS PASSED — nothing was persisted' as result;
