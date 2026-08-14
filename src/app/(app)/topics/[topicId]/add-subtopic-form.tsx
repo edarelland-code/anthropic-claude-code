@@ -25,7 +25,7 @@ export function AddSubtopicForm({ topicId }: { topicId: string }) {
           required
           maxLength={120}
           placeholder="Add a subtopic — e.g. Branding"
-          className="min-w-0 flex-1 rounded-md px-3 py-2 text-sm surface"
+          className="min-w-0 flex-1 rounded-md px-3 py-2.5 text-sm surface"
         />
         <AddButton />
       </div>

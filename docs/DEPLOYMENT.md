@@ -141,6 +141,52 @@ The preflight distinguishes a blocked host from an unreachable one. An egress ga
 the TLS handshake and then answers the request itself, so "the socket opened" is not evidence of
 reachability — the check reads the response body and names an allowlist rejection as such.
 
+## 3b. When the Postgres wire protocol is unreachable
+
+Some environments allow HTTPS but not raw Postgres. This one does: the pooler's `:5432` and
+`:6543` time out, and `db.<ref>.supabase.co` resolves IPv6-only with no IPv6 available. The
+failure appears as a connect timeout *before* any password prompt, so it is easy to misread as an
+authentication problem. It is not — `supabase link` succeeds without a password, and `db push`
+fails the same way with or without one.
+
+What still works, and what to use instead:
+
+| Normally | When Postgres is unreachable |
+|---|---|
+| `supabase db push` | Management API `POST /v1/projects/{ref}/database/query`, then record history (§4a step 4) |
+| `supabase db diff --linked` | `npm run schema:parity` |
+| `psql` against the project | Same Management API endpoint |
+| A browser pointed at the production URL | A local production build against hosted Supabase, plus HTTP checks of the real URL |
+
+`npm run schema:parity` applies the real migration to a throwaway cluster and compares catalogs —
+columns, enums, RLS, policies with their USING and WITH CHECK expressions, indexes, constraints,
+triggers, and functions — against the hosted project. It is a catalog comparison, not a
+byte-for-byte DDL diff, and it excludes extension-owned functions because the local shim installs
+pgcrypto into `public` while hosted Supabase uses a dedicated `extensions` schema. Report its
+result as catalog parity, never as "db diff clean".
+
+## 3c. End-to-end validation
+
+```bash
+npm run validate:hosted -- <url>
+```
+
+Covers exit criteria B, C, D, E, F, G, H, I, J, and L against a real browser and the real hosted
+database. It signs in by driving `/auth/confirm?token_hash=…` rather than by minting a session
+cookie, so the app's own verification route, cookie writing, and middleware refresh are all
+exercised. The admin key is used only to generate the link an email would otherwise carry, so no
+mailbox is needed.
+
+It asserts rows in the database, not just text on the page. That distinction caught a real false
+pass: three forms on the topic page carry a hidden `topicId`, so a title-based check was satisfied
+by an *action* created through the Open Issues form while `knowledge_entries` stayed empty.
+
+The authenticated responsive audit runs inside this script, before its cleanup deletes the
+throwaway accounts — a session handed to a later process is already invalid, which is why those
+25 combinations reported as skipped for so long.
+
+Test accounts use a `+contextshelf-qa` alias and are deleted in a `finally` block.
+
 ## 4a. Applying the migration when the CLI is unavailable
 
 The CLI is the preferred path — it records migration history. If it cannot run (for example from a
@@ -231,6 +277,34 @@ Do not change any other template. Password recovery and email-change flows are n
 
 ---
 
+## 6a. Email templates on the free tier
+
+§6 cannot be completed on a free-tier project using the default email provider. Both the
+Management API and the dashboard refuse:
+
+> Email template modification is not available for free tier projects using the default email
+> provider. Please upgrade your plan or configure a custom SMTP provider.
+
+Until a paid plan or custom SMTP is in place, Supabase sends its default PKCE-shaped link. The app
+handles that shape, so sign-in works — but the link is bound to the device that requested it, so
+open it on that device. This is the one part of AD-13's promise that configuration alone cannot
+deliver.
+
+## Status: Phase 1 is provisioned and closed
+
+This document is now a runbook for reproducing the setup, not a list of things still to do. As of
+2026-08-14 the hosted project and the deployment both exist and are validated:
+
+| | |
+|---|---|
+| Production URL | <https://contextshelf.vercel.app> |
+| Supabase project | `omhktzxwffaipmcoljic` — 24 tables, 31 policies, migration `0001` recorded |
+| Auth | Site URL and five redirect URLs set |
+| Cross-device | **Passed on two physical machines**, both directions |
+
+The one step that could not be completed is §6, the email templates — see §6a. Everything else in
+§§1–5 is done.
+
 ## Verifying the deployment
 
 Run these in order. Each is a Phase 1 exit criterion.
@@ -250,6 +324,11 @@ Run these in order. Each is a Phase 1 exit criterion.
 | M. Production | Open the URL on a phone | works over HTTPS |
 
 ### The cross-device test (the acceptance test)
+
+> **Passed 2026-08-14** on two physical machines: data created on the Work PC appeared on the Mac,
+> and an update made on the Mac appeared back on the Work PC. No export, no import. The steps
+> below remain the procedure for re-verifying after any change to auth, session handling, or the
+> data layer.
 
 **Device A — whichever machine you are at now (Windows PC or Mac)**
 
@@ -313,26 +392,44 @@ Everything else — `npm run build`, `typecheck`, `lint`, `test`, `test:responsi
 
 ## Which environment can do what
 
-Not every environment can complete setup. Verified 2026-08-13:
+Verified 2026-08-14, on a Claude Code web session whose network policy permits HTTPS to the
+Supabase and Vercel hosts. An earlier revision recorded those hosts as blocked entirely; that is
+no longer accurate, and the replacement constraint is narrower.
 
 | Task | Claude Code on the web | Claude Code CLI, run locally |
 |---|---|---|
 | Build, typecheck, lint, unit tests | yes | yes |
 | `npm run test:db` (ephemeral Postgres) | yes | yes (needs local PostgreSQL 16) |
-| `npm run test:responsive` (unauthenticated) | yes | yes |
 | Git push to GitHub | yes | yes |
 | Set the GitHub **default branch** | no — proxy blocks repo-settings writes | yes |
-| `supabase login / link / db push / db diff` | no — `*.supabase.co` blocked | yes |
-| Hosted schema + RLS validation | no | yes |
-| Vercel deploy | no — `vercel.com` blocked | yes |
+| `supabase login` (device code) | yes, with a pty; see below | yes |
+| `supabase link` | yes | yes |
+| `supabase db push` / `db diff --linked` | **no** — Postgres wire protocol unreachable | yes |
+| Apply the migration | yes, via the Management API (§4a) | yes |
+| Hosted schema + RLS validation | yes, via the Management API | yes |
+| Schema parity | yes, `npm run schema:parity` | yes, or `db diff --linked` |
+| `vercel login` / deploy | yes | yes |
+| Browser against the **deployed** URL | **no** — Chromium's tunnels are reset | yes |
+| Browser against a **local** build on hosted Supabase | yes | yes |
 
-The web environment is fine for building and validating ContextShelf. **Provisioning it against
-the hosted project requires the local CLI**, because those hosts are outside its egress policy.
+Two details that cost real time, recorded so they do not have to be rediscovered:
+
+- **The Supabase and Vercel CLIs fail through an explicit `HTTPS_PROXY`.** Supabase reports a bare
+  `Transport error` and Vercel's device-code poll reports `fetch failed`, while `curl` and Node's
+  `fetch` reach the same hosts. Where egress is transparently routed, unsetting the proxy
+  variables for those child processes fixes it without weakening anything — TLS verification is
+  untouched and the same egress policy still applies. `scripts/provision.mjs` does this.
+- **`supabase login` needs a real terminal, and the pty needs a window size.** A pty opens at 0x0,
+  and the CLI's prompt divides by the terminal width to decide where to wrap — at zero columns it
+  wraps every character onto its own line, emits cursor-up runs of 150+ lines, and never processes
+  input coherently. Set `TIOCSWINSZ` to something real (120x40). The prompt also submits on
+  carriage return, not newline. Alternatively, skip the flow entirely by setting
+  `SUPABASE_ACCESS_TOKEN`, which `npm run provision` reads.
 
 Claude Code on the web runs the agent in Anthropic's cloud, on Linux — not on the machine whose
-browser you are using. It cannot see your `C:` drive, your local clone, or your local `.env.local`,
-and it cannot reach Supabase or Vercel. To have the agent work on your own machine, install the
-CLI there:
+browser you are using. It cannot see your `C:` drive or your local clone, and it cannot complete
+the cross-device acceptance test, which by definition needs two physical machines. To have the
+agent work on your own machine:
 
 ```powershell
 npm install -g @anthropic-ai/claude-code

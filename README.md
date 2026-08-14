@@ -17,16 +17,22 @@ Workspace → Topic → Subtopic → Knowledge → Source
 
 ## Status
 
-**Phase 1 (Foundation) — implemented, locally tested, and database validated. Not yet production
-validated or cross-device validated.** The remaining work is a hosted Supabase project and a
-deployment, both of which need the account holder. Full status, evidence per criterion, and the
-next task: [`docs/DEVELOPMENT_STATE.md`](docs/DEVELOPMENT_STATE.md). Setup:
+**Phase 1 (Foundation) — complete.** All thirteen exit criteria pass, including the cross-device
+acceptance test on two physical machines. Live at **<https://contextshelf.vercel.app>**, backed by
+a hosted Supabase project with the schema applied and row-level security verified against it.
+
+One limitation is carried forward: the OTP email templates cannot be set on the free tier, so a
+sign-in *link* stays bound to the device that requested it. Cross-device *data* continuity is
+proven and unaffected.
+
+Full status, evidence per criterion, and the next task:
+[`docs/DEVELOPMENT_STATE.md`](docs/DEVELOPMENT_STATE.md). Setup:
 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
 | Phase | Scope | State |
 |---|---|---|
 | 0 | Architecture, schema, rules | Done |
-| 1 | Auth · Topics · Subtopics · Knowledge entries · Home · Topic page · responsive shell | Database validated |
+| 1 | Auth · Topics · Subtopics · Knowledge entries · Home · Topic page · responsive shell | **Complete — deployed and cross-device validated** |
 | 2 | Timeline · Decisions · Ideas · Prompts + versions · Current State · Master Memory · Relationships | Not started |
 | 3 | Inbox · Quick Capture · Search · Files · JSON + transcript import | Not started |
 | 4 | Resume in Claude (Compact / Standard / Full Audit × Chat / Cowork / Code) | Not started |

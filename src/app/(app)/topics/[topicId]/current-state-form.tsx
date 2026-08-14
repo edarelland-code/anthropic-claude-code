@@ -90,14 +90,14 @@ export function CurrentStateForm({
       <input type="hidden" name="expectedUpdatedAt" value={expectedUpdatedAt} />
 
       <Field label="Goal">
-        <textarea name="goal" rows={2} defaultValue={goal ?? ''} className="w-full rounded-md px-3 py-2 text-sm surface" />
+        <textarea name="goal" rows={2} defaultValue={goal ?? ''} className="w-full rounded-md px-3 py-2.5 text-sm surface" />
       </Field>
       <Field label="Current state">
         <textarea
           name="currentState"
           rows={4}
           defaultValue={currentState ?? ''}
-          className="w-full rounded-md px-3 py-2 text-sm surface"
+          className="w-full rounded-md px-3 py-2.5 text-sm surface"
           placeholder="What is true right now — the direction in force, what is built, what is not."
         />
       </Field>
@@ -108,7 +108,7 @@ export function CurrentStateForm({
           min={0}
           max={100}
           defaultValue={progress}
-          className="w-24 rounded-md px-3 py-2 text-sm surface"
+          className="w-24 rounded-md px-3 py-2.5 text-sm surface"
         />
       </Field>
 
@@ -121,7 +121,7 @@ export function CurrentStateForm({
             name="resumeTriggerIf"
             defaultValue={resumeTriggerIf ?? ''}
             placeholder="I return to this topic"
-            className="w-full rounded-md px-3 py-2 text-sm surface"
+            className="w-full rounded-md px-3 py-2.5 text-sm surface"
           />
         </Field>
         <div className="mt-2">
@@ -130,7 +130,7 @@ export function CurrentStateForm({
               name="resumeTriggerThen"
               defaultValue={resumeTriggerThen ?? ''}
               placeholder="Resume from … and complete …"
-              className="w-full rounded-md px-3 py-2 text-sm surface"
+              className="w-full rounded-md px-3 py-2.5 text-sm surface"
             />
           </Field>
         </div>

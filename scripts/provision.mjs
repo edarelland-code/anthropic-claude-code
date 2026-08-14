@@ -19,13 +19,25 @@
  *   9  production deploy            captures the real URL
  *  10  NEXT_PUBLIC_SITE_URL         set to the canonical URL, then redeploy
  *  11  production smoke test        HTTPS, routes, no credential leakage
+ *  12  auth URL config              site URL, redirect allow-list, both email
+ *                                   templates — set and then read back
  *
  * Cross-platform: plain Node, no bash. Works in PowerShell, cmd, and any POSIX
  * shell.
  *
- * Interactive steps use stdio: 'inherit', so the Supabase CLI owns the browser
- * handoff and the password prompt directly. This script never reads, stores, or
- * echoes a credential.
+ * Two ways to run it:
+ *
+ *   Interactive (preferred). Steps use stdio: 'inherit', so the Supabase CLI
+ *   owns the browser handoff and the password prompt directly, and this script
+ *   never reads, stores, or echoes a credential.
+ *
+ *   Unattended. A CI job, a piped shell, and an agent session have no TTY, and
+ *   the CLI will not prompt without one. Setting SUPABASE_ACCESS_TOKEN,
+ *   SUPABASE_DB_PASSWORD, and VERCEL_TOKEN runs the same sequence end to end.
+ *   Those values are held in memory, registered with a redactor so no child
+ *   process can print them, and written only to .env.local, which is
+ *   gitignored. Step 0 will bootstrap .env.local from the Management API when
+ *   the file is absent and a token is available.
  *
  * Flags:
  *   --skip-login     assume the CLI is already authenticated
@@ -35,12 +47,69 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
+
+/**
+ * Credentials, when a terminal is not available.
+ *
+ * The interactive path below is still the default and still preferred: the CLI
+ * owns the browser handoff and the password prompt, and this script never sees
+ * either. But an agent session, a CI job, and a piped shell all lack a TTY, and
+ * the CLI refuses to prompt there. Supplying these three values makes the whole
+ * sequence run unattended; leaving them unset changes nothing.
+ */
+const ACCESS_TOKEN = process.env.SUPABASE_ACCESS_TOKEN || null;
+const DB_PASSWORD = process.env.SUPABASE_DB_PASSWORD || null;
+const VERCEL_TOKEN = process.env.VERCEL_TOKEN || null;
+const HAS_TTY = Boolean(process.stdin.isTTY);
+const MGMT = 'https://api.supabase.com';
+
+/**
+ * Values that must never reach stdout, whatever a child process prints.
+ *
+ * The interactive path never learns a credential, so it never needed this. The
+ * non-interactive path does hold them, so every write goes through `scrub()`.
+ */
+const SECRETS = new Set([ACCESS_TOKEN, DB_PASSWORD, VERCEL_TOKEN].filter((s) => s && s.length >= 8));
+const scrub = (text) => {
+  let out = String(text);
+  for (const s of SECRETS) out = out.split(s).join('«redacted»');
+  return out;
+};
+
+/**
+ * The Supabase CLI's HTTP client cannot negotiate an explicit CONNECT proxy —
+ * in a sandbox that sets HTTPS_PROXY it reports a bare "Transport error" where
+ * curl and Node's own fetch both get real responses. Where egress is
+ * transparently routed the request still succeeds, and still passes through the
+ * same policy, once the variables are out of the way. TLS verification is
+ * untouched. Outside such a sandbox these variables are unset anyway, so this
+ * is a no-op.
+ */
+function cliEnv(extra = {}) {
+  const env = { ...process.env, ...extra };
+  for (const k of ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy']) delete env[k];
+  return env;
+}
+
+/** Management API call. Returns parsed JSON, or throws with the real message. */
+async function mgmt(path, { method = 'GET', body } = {}) {
+  const res = await fetch(`${MGMT}${path}`, {
+    method,
+    headers: { Authorization: `Bearer ${ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch { /* not JSON */ }
+  if (!res.ok) throw new Error(`${path} → HTTP ${res.status}: ${json?.message ?? text.slice(0, 200)}`);
+  return json;
+}
 const flag = (name) => args.includes(`--${name}`);
 const value = (name, fallback) => {
   const i = args.indexOf(`--${name}`);
@@ -80,17 +149,22 @@ function die(message, guidance) {
 
 /** Runs the Supabase CLI. `interactive` hands the terminal over for prompts. */
 function supabase(cliArgs, { interactive = false, allowFailure = false } = {}) {
+  // Without a terminal the CLI cannot prompt, so an interactive request is
+  // downgraded to a piped one; the caller has already supplied whatever the
+  // prompt would have asked for as a flag or an environment variable.
+  const canPrompt = interactive && HAS_TTY;
   const result = spawnSync('npx', ['--yes', 'supabase@latest', ...cliArgs], {
     cwd: ROOT,
-    stdio: interactive ? 'inherit' : ['inherit', 'pipe', 'pipe'],
+    stdio: canPrompt ? 'inherit' : ['pipe', 'pipe', 'pipe'],
     encoding: 'utf8',
+    env: cliEnv(ACCESS_TOKEN ? { SUPABASE_ACCESS_TOKEN: ACCESS_TOKEN } : {}),
     shell: IS_WINDOWS, // npx needs a shell to resolve npx.cmd on Windows
   });
 
   const stdout = result.stdout ?? '';
   const stderr = result.stderr ?? '';
-  if (!interactive && (stdout || stderr)) {
-    const text = `${stdout}${stderr}`.trimEnd();
+  if (!canPrompt && (stdout || stderr)) {
+    const text = scrub(`${stdout}${stderr}`).trimEnd();
     if (text) console.log(c.dim(text.split('\n').map((l) => `    │ ${l}`).join('\n')));
   }
   if (result.status !== 0 && !allowFailure) {
@@ -180,11 +254,43 @@ if (blocked.length) {
 }
 record('network reachability', true, 'api.supabase.com and project host resolve');
 
+/**
+ * `.env.local` holds the project URL and the publishable key. Both are
+ * readable from the Management API, so when an access token is available there
+ * is no reason to make someone copy them out of the dashboard by hand — and no
+ * reason for a missing file to stop the run.
+ */
+if (!existsSync(resolve(ROOT, '.env.local')) && ACCESS_TOKEN) {
+  try {
+    const keys = await mgmt(`/v1/projects/${PROJECT_REF}/api-keys?reveal=true`);
+    const publishable = keys.find((k) => k.type === 'publishable' || k.name === 'anon');
+    const secret = keys.find((k) => k.type === 'secret' || k.name === 'service_role');
+    if (!publishable?.api_key) throw new Error('no publishable key returned');
+    for (const k of [publishable.api_key, secret?.api_key]) if (k) SECRETS.add(k);
+    writeFileSync(
+      resolve(ROOT, '.env.local'),
+      [
+        '# Generated by `npm run provision` from the Supabase Management API.',
+        '# Gitignored. Never commit real values.',
+        `NEXT_PUBLIC_SUPABASE_URL=https://${PROJECT_REF}.supabase.co`,
+        `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=${publishable.api_key}`,
+        ...(secret?.api_key ? [`SUPABASE_SECRET_KEY=${secret.api_key}`] : []),
+        'NEXT_PUBLIC_SITE_URL=http://localhost:3000',
+        '',
+      ].join('\n'),
+      { mode: 0o600 },
+    );
+    record('.env.local bootstrapped', true, 'project URL and publishable key read from the API');
+  } catch (e) {
+    record('.env.local bootstrap', false, scrub(e.message));
+  }
+}
+
 if (!existsSync(resolve(ROOT, '.env.local'))) {
   record('.env.local present', false);
   die(
     '.env.local is missing.',
-    'Copy .env.example to .env.local and fill in the project URL and publishable\nkey from Supabase → Project Settings → API Keys.',
+    'Copy .env.example to .env.local and fill in the project URL and publishable\nkey from Supabase → Project Settings → API Keys.\n\nOr set SUPABASE_ACCESS_TOKEN and re-run — the script will read both values\nfrom the Management API and write the file itself.',
   );
 }
 const envText = readFileSync(resolve(ROOT, '.env.local'), 'utf8');
@@ -197,11 +303,21 @@ if (!hasPublishable) {
 // --- 1. Authenticate --------------------------------------------------------
 if (!flag('skip-login')) {
   heading('Supabase CLI authentication');
-  if (!process.stdin.isTTY) {
-    record('interactive terminal', false, 'stdin is not a TTY');
+  if (!HAS_TTY && !ACCESS_TOKEN) {
+    record('interactive terminal', false, 'stdin is not a TTY and SUPABASE_ACCESS_TOKEN is unset');
     die(
-      'Supabase login needs an interactive terminal.',
-      'This is running without a TTY (a piped or automated shell). Run\n`npm run provision` directly in PowerShell, Terminal, or your shell of choice.',
+      'Supabase login needs either an interactive terminal or an access token.',
+      [
+        'This is running without a TTY (a piped, CI, or agent shell), where the',
+        'CLI cannot open a browser or prompt.',
+        '',
+        'Either run `npm run provision` directly in PowerShell, Terminal, or your',
+        'shell of choice, or supply a token and re-run unattended:',
+        '',
+        '    SUPABASE_ACCESS_TOKEN=…   https://supabase.com/dashboard/account/tokens',
+        '    SUPABASE_DB_PASSWORD=…    the project database password',
+        '    VERCEL_TOKEN=…            https://vercel.com/account/tokens',
+      ].join('\n'),
     );
   }
   const probe = supabase(['projects', 'list'], { allowFailure: true });
@@ -220,8 +336,19 @@ if (!flag('skip-login')) {
 
 // --- 2. Link ----------------------------------------------------------------
 heading(`Link to project ${PROJECT_REF}`);
-console.log(c.yellow('    The CLI will prompt for the database password. Type it at the prompt —'));
-console.log(c.yellow('    it is read directly by the CLI and is never seen or stored by this script.'));
+if (HAS_TTY) {
+  console.log(c.yellow('    The CLI will prompt for the database password. Type it at the prompt —'));
+  console.log(c.yellow('    it is read directly by the CLI and is never seen or stored by this script.'));
+} else if (!DB_PASSWORD) {
+  record('supabase link', false, 'no TTY to prompt with and SUPABASE_DB_PASSWORD is unset');
+  die(
+    'Linking needs the database password.',
+    'Without a terminal the CLI cannot prompt for it. Set SUPABASE_DB_PASSWORD and\nre-run, or run `npm run provision` from an interactive shell.\n\nReset it if unknown: Dashboard → Project Settings → Database → Reset database password.',
+  );
+}
+// The CLI reads SUPABASE_DB_PASSWORD from its environment when it cannot
+// prompt, so the password never appears in argv and never shows up in a
+// process listing.
 const link = supabase(['link', '--project-ref', PROJECT_REF], { interactive: true });
 if (!link.ok) {
   record('supabase link', false);
@@ -283,14 +410,19 @@ if (!rls.ok || !rlsPassed) {
 let productionUrl = null;
 
 function vercel(cliArgs, { interactive = false, input } = {}) {
-  const result = spawnSync('npx', ['--yes', 'vercel@latest', ...cliArgs], {
+  // A token authenticates every call, which is what makes the Vercel half
+  // runnable without a browser. --token is appended rather than exported
+  // because the CLI ignores VERCEL_TOKEN for some subcommands.
+  const withToken = VERCEL_TOKEN ? [...cliArgs, '--token', VERCEL_TOKEN] : cliArgs;
+  const result = spawnSync('npx', ['--yes', 'vercel@latest', ...withToken], {
     cwd: ROOT,
-    stdio: interactive ? 'inherit' : ['pipe', 'pipe', 'pipe'],
+    stdio: interactive && HAS_TTY ? 'inherit' : ['pipe', 'pipe', 'pipe'],
     input,
     encoding: 'utf8',
+    env: cliEnv(),
     shell: IS_WINDOWS,
   });
-  return { ok: result.status === 0, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+  return { ok: result.status === 0, stdout: scrub(result.stdout ?? ''), stderr: scrub(result.stderr ?? '') };
 }
 
 /** Reads one value out of .env.local without ever printing it. */
@@ -310,6 +442,12 @@ if (!flag('skip-vercel')) {
   const who = vercel(['whoami']);
   if (who.ok) {
     record('already authenticated', true, who.stdout.trim());
+  } else if (!HAS_TTY) {
+    record('vercel authentication', false, VERCEL_TOKEN ? 'the supplied token was rejected' : 'no TTY and VERCEL_TOKEN is unset');
+    die(
+      'Vercel authentication is not available without a browser or a token.',
+      'The Supabase half above succeeded and is unaffected. Set VERCEL_TOKEN\n(https://vercel.com/account/tokens) and re-run with --skip-push to deploy,\nor run `npm run provision` from an interactive shell.',
+    );
   } else {
     console.log(c.yellow('    Opening a browser for Vercel login. Approve it, then this continues automatically.'));
     if (!vercel(['login'], { interactive: true }).ok) {
@@ -377,22 +515,67 @@ if (!flag('skip-vercel')) {
   check('/home', ['307', '302']);   // unauthenticated -> /login
 }
 
+// --- 12. Auth URL configuration and email templates -------------------------
+//
+// An earlier version of this script called these "the parts no API exposes"
+// and printed them for someone to copy into the dashboard. That was wrong:
+// PATCH /v1/projects/{ref}/config/auth sets the site URL, the redirect
+// allow-list, and both mailer templates. Doing it here closes the gap that
+// makes a magic link silently bounce, and it is checked by reading the config
+// back rather than trusting the write.
+let authConfigured = false;
+if (productionUrl && ACCESS_TOKEN) {
+  heading('Supabase auth URL configuration');
+  const host = new URL(productionUrl).host;
+  const allowList = [
+    `${productionUrl}/auth/callback`,
+    `${productionUrl}/auth/confirm`,
+    `https://${host.replace(/^([^.]+)\./, '$1-*.')}/auth/**`, // preview deploys
+    'http://localhost:3000/auth/callback',
+    'http://localhost:3000/auth/confirm',
+  ];
+  // Neither template carries a device-bound secret, so a link requested on one
+  // machine opens on another (AD-13). Both matter: signInWithOtp sends "Confirm
+  // signup" to an address that has never signed in, and "Magic Link" after.
+  const magicLink = '<h2>Sign in to ContextShelf</h2>\n<p><a href="{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=magiclink">Sign in to ContextShelf</a></p>';
+  const confirmation = '<h2>Confirm your email</h2>\n<p><a href="{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=signup">Confirm your email</a></p>';
+
+  try {
+    await mgmt(`/v1/projects/${PROJECT_REF}/config/auth`, {
+      method: 'PATCH',
+      body: {
+        site_url: productionUrl,
+        uri_allow_list: allowList.join(','),
+        mailer_templates_magic_link_content: magicLink,
+        mailer_templates_confirmation_content: confirmation,
+      },
+    });
+    const readBack = await mgmt(`/v1/projects/${PROJECT_REF}/config/auth`);
+    const siteOk = readBack.site_url === productionUrl;
+    const listOk = allowList.every((u) => (readBack.uri_allow_list ?? '').includes(u));
+    const tplOk = /token_hash/.test(readBack.mailer_templates_magic_link_content ?? '')
+      && /token_hash/.test(readBack.mailer_templates_confirmation_content ?? '');
+    record('site URL', siteOk, productionUrl);
+    record('redirect allow-list', listOk, `${allowList.length} entries`);
+    record('email templates (token_hash form)', tplOk, 'magic link + confirm signup');
+    authConfigured = siteOk && listOk && tplOk;
+  } catch (e) {
+    record('auth URL configuration', false, scrub(e.message));
+  }
+}
+
 // ---------------------------------------------------------------------------
 summary();
 console.log(
   [
     '',
-    c.bold('Next — the parts no API exposes:'),
-    productionUrl
-      ? `  1. Supabase -> Authentication -> URL Configuration. Site URL: ${productionUrl}`
-      : '  1. Supabase -> Authentication -> URL Configuration (after deploying).',
-    productionUrl
-      ? `     Redirect URLs: ${productionUrl}/auth/callback, ${productionUrl}/auth/confirm,`
-      : '     Redirect URLs: <production>/auth/callback and /auth/confirm,',
-    '     plus http://localhost:3000/auth/callback and /auth/confirm',
-    '  2. Supabase -> Authentication -> Email Templates. Set BOTH Magic Link and',
-    '     Confirm signup to the token-hash form in docs/DEPLOYMENT.md section 6.',
-    '  3. Run the cross-device acceptance test in docs/DEPLOYMENT.md.',
+    c.bold('Next:'),
+    authConfigured
+      ? '  1. Auth URLs and both email templates are configured and verified above.'
+      : productionUrl
+        ? `  1. Supabase -> Authentication -> URL Configuration. Site URL: ${productionUrl}\n     Redirect URLs: ${productionUrl}/auth/callback, ${productionUrl}/auth/confirm,\n     plus http://localhost:3000/auth/callback and /auth/confirm\n  1b. Email Templates: set BOTH Magic Link and Confirm signup to the\n     token-hash form in docs/DEPLOYMENT.md section 6.`
+        : '  1. Supabase -> Authentication -> URL Configuration (after deploying).',
+    '  2. Run the cross-device acceptance test in docs/DEPLOYMENT.md.',
     '',
   ].join('\n'),
 );

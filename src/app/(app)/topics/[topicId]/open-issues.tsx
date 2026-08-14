@@ -84,7 +84,7 @@ export function OpenIssues({ topicId, actions }: { topicId: string; actions: Act
             required
             maxLength={300}
             placeholder="Add…"
-            className="min-w-0 basis-full rounded-md px-3 py-2 text-sm surface sm:basis-auto sm:flex-1"
+            className="min-w-0 basis-full rounded-md px-3 py-2.5 text-sm surface sm:basis-auto sm:flex-1"
           />
           <AddButton />
         </div>
