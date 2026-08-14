@@ -1,7 +1,8 @@
 import Link from 'next/link';
-import { AlertTriangle, ArrowRight, Clock, Plus } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Clock, History, Plus } from 'lucide-react';
 
 import { TopicCard } from '@/components/topics/topic-card';
+import { TimelineList } from '@/components/timeline/timeline-list';
 import { getData } from '@/lib/data';
 import type { TopicSummary } from '@/lib/domain/types';
 import { freshness } from '@/lib/utils';
@@ -23,6 +24,11 @@ export default async function HomePage() {
   const blocked = topics.filter((t) => t.topic.status === 'blocked');
   const recentlyActive = topics.slice(0, 6);
   const stale = topics.filter((t) => freshness(t.topic.lastMeaningfulUpdateAt).days >= 30);
+
+  // "What changed while I was away" — one read across every record type rather
+  // than a query per section.
+  const recent = await data.timeline.query({ workspaceId: workspace.id, limit: 8 });
+  const topicNames = new Map(topics.map((t) => [t.topic.id, t.topic.name]));
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6 lg:py-8">
@@ -106,7 +112,23 @@ export default async function HomePage() {
             </Section>
           )}
 
-          <PhaseTwoNote />
+          {recent.length > 0 && (
+            <Section
+              title="What changed"
+              subtitle="every source, newest first"
+              icon={<History className="size-4 muted" aria-hidden />}
+            >
+              <TimelineList events={recent} showTopicLink topicNames={topicNames} />
+              <Link
+                href="/timeline"
+                className="mt-2 inline-flex min-h-11 items-center text-sm muted hover:underline"
+              >
+                Full timeline
+              </Link>
+            </Section>
+          )}
+
+          <PhaseThreeNote />
         </div>
       )}
     </div>
@@ -166,13 +188,20 @@ function FirstRun() {
   );
 }
 
-function PhaseTwoNote() {
+/**
+ * Names what is still missing, and when it lands.
+ *
+ * Decisions, Ideas, Prompts, and the Timeline arrived in Phase 2 and are now
+ * real, so they are no longer listed here. Quick Capture and the unsorted Inbox
+ * are Phase 3 and stay named rather than mocked (rule 14).
+ */
+function PhaseThreeNote() {
   return (
     <p className="flex items-start gap-2 rounded-lg p-3.5 text-xs leading-5 muted surface">
       <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
       <span>
-        Recent Decisions, New Ideas, Winning Prompts, and Unsorted Inbox belong on this dashboard
-        and arrive in Phases 2–3. They are absent rather than mocked.
+        Quick Capture and the unsorted Inbox land in Phase 3, along with transcript import and
+        full-text search. They are absent rather than mocked.
       </span>
     </p>
   );

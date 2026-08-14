@@ -34,7 +34,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -148,7 +148,13 @@ function buildLocal() {
   sh(`${q(join(PGBIN, 'initdb'))} -D ${q(DATA)} -U postgres -A trust --no-sync`);
   sh(`${q(join(PGBIN, 'pg_ctl'))} -D ${q(DATA)} -l ${q(join(dir, 'log'))} -w -o "-k ${SOCK} -h '' -c fsync=off" start`);
   psql(resolve(ROOT, 'supabase/tests/00_supabase_shim.sql'), { file: true });
-  psql(resolve(ROOT, 'supabase/migrations/0001_init.sql'), { file: true });
+  // Every migration, in order. Hardcoding 0001 made this script compare the
+  // hosted database against a stale reference and report each new object as a
+  // difference — a parity check that drifts is worse than none.
+  const migrationsDir = resolve(ROOT, "supabase/migrations");
+  const migrations = readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort();
+  if (!migrations.length) throw new Error('no migrations found');
+  for (const file of migrations) psql(join(migrationsDir, file), { file: true });
 }
 function localRows(sql) {
   const out = psql(`copy (${sql}) to stdout with (format csv)`);
