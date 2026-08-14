@@ -14,6 +14,8 @@ import type {
   Relationship,
   SourceSession,
   SourceType,
+  TimelineEvent,
+  TimelineQuery,
   Subtopic,
   Topic,
   TopicContext,
@@ -39,6 +41,7 @@ import {
   type RelatedRecord,
   type RelationshipRepository,
   type SessionUser,
+  type TimelineRepository,
   type SourceSessionRepository,
   type SubtopicRepository,
   type TopicRepository,
@@ -1597,6 +1600,56 @@ class SupabaseRelationships implements RelationshipRepository {
   }
 }
 
+/**
+ * The unified Timeline.
+ *
+ * Everything is one query against `timeline_events`. Merging eight collections
+ * in TypeScript would need every page of every source loaded before the first
+ * row could be ordered, and would not paginate.
+ */
+class SupabaseTimeline implements TimelineRepository {
+  constructor(private readonly db: SupabaseClient) {}
+
+  async query(q: TimelineQuery): Promise<TimelineEvent[]> {
+    let sel = this.db.from('timeline_events').select('*');
+    if (q.workspaceId) sel = sel.eq('workspace_id', q.workspaceId);
+    if (q.topicId) sel = sel.eq('topic_id', q.topicId);
+    // subtopic_ids is an array so an entry under several subtopics matches
+    // each of them; `contains` is the array-aware equivalent of eq.
+    if (q.subtopicId) sel = sel.contains('subtopic_ids', [q.subtopicId]);
+    if (q.entityTypes?.length) sel = sel.in('entity_type', q.entityTypes);
+    if (q.kinds?.length) sel = sel.in('kind', q.kinds);
+    if (q.sourceTypes?.length) sel = sel.in('source_type', q.sourceTypes);
+    if (q.since) sel = sel.gte('occurred_at', q.since);
+    if (q.until) sel = sel.lte('occurred_at', q.until);
+
+    const limit = q.limit ?? 100;
+    const offset = q.offset ?? 0;
+    const { data, error } = await sel
+      .order('occurred_at', { ascending: false })
+      .range(offset, offset + limit - 1);
+    if (error) throw new Error(`timeline: ${error.message}`);
+    return ((data ?? []) as Row[]).map(map.toTimelineEvent);
+  }
+
+  async countsByKind(
+    q: Pick<TimelineQuery, 'workspaceId' | 'topicId' | 'subtopicId'>,
+  ): Promise<Record<string, number>> {
+    let sel = this.db.from('timeline_events').select('kind');
+    if (q.workspaceId) sel = sel.eq('workspace_id', q.workspaceId);
+    if (q.topicId) sel = sel.eq('topic_id', q.topicId);
+    if (q.subtopicId) sel = sel.contains('subtopic_ids', [q.subtopicId]);
+    const { data, error } = await sel;
+    if (error) throw new Error(`timeline counts: ${error.message}`);
+    const counts: Record<string, number> = {};
+    for (const row of (data ?? []) as Row[]) {
+      const kind = String(row.kind);
+      counts[kind] = (counts[kind] ?? 0) + 1;
+    }
+    return counts;
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 export function createDataContext(db: SupabaseClient): DataContext {
@@ -1614,6 +1667,7 @@ export function createDataContext(db: SupabaseClient): DataContext {
     sessions: new SupabaseSessions(db),
     inbox: new SupabaseInbox(db),
     relationships: new SupabaseRelationships(db),
+    timeline: new SupabaseTimeline(db),
   };
 }
 

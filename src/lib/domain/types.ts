@@ -415,3 +415,70 @@ export interface TopicContext {
   milestones: Milestone[];
   sessions: SourceSession[];
 }
+
+// ---------------------------------------------------------------------------
+// Timeline
+// ---------------------------------------------------------------------------
+
+/**
+ * One row of the unified Timeline.
+ *
+ * Read from the `timeline_events` view, which projects every record type into
+ * this shape. It is derived and holds nothing of its own — the underlying row
+ * is always authoritative, and `entityType` + `id` locate it.
+ */
+export interface TimelineEvent {
+  id: string;
+  workspaceId: string;
+  topicId: string;
+  /** An entry can sit under several subtopics; typed records carry at most one. */
+  subtopicIds: string[];
+  entityType: EntityType;
+  /** knowledge_type, action kind, file kind, or a literal like 'decision'. */
+  kind: string;
+  title: string;
+  summary: string | null;
+  sourceType: SourceType | null;
+  status: string | null;
+  supersededById: string | null;
+  occurredAt: string;
+  createdAt: string;
+}
+
+/** Filters the Timeline page and the Topic page timeline both use. */
+export interface TimelineQuery {
+  workspaceId?: string;
+  topicId?: string;
+  subtopicId?: string;
+  entityTypes?: EntityType[];
+  kinds?: string[];
+  sourceTypes?: SourceType[];
+  since?: string;
+  until?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * Named filter groups, as they appear in the UI.
+ *
+ * These map a user-facing word onto the `kind` values the projection emits, so
+ * the page never hard-codes database vocabulary.
+ */
+export const TIMELINE_FILTERS = {
+  all: [],
+  decisions: ['decision'],
+  ideas: ['idea', 'suggestion', 'rejected_idea'],
+  prompts: ['prompt', 'winning_prompt', 'failed_prompt'],
+  implementations: ['implementation', 'added', 'refactored'],
+  changes: ['change', 'removed'],
+  bugs: ['bug'],
+  fixes: ['fix'],
+  files: ['file', 'link', 'repo_file', 'upload', 'url'],
+  blockers: ['blocker'],
+  milestones: ['milestone'],
+  progress: ['progress'],
+  research: ['research'],
+} as const satisfies Record<string, readonly string[]>;
+
+export type TimelineFilterKey = keyof typeof TIMELINE_FILTERS;

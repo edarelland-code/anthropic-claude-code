@@ -23,6 +23,8 @@ import type {
   RelationshipType,
   SourceSession,
   SourceType,
+  TimelineEvent,
+  TimelineQuery,
   Subtopic,
   Topic,
   TopicContext,
@@ -311,6 +313,20 @@ export interface InboxRepository {
   discard(id: string): Promise<void>;
 }
 
+/**
+ * The unified Timeline.
+ *
+ * Backed by the `timeline_events` projection, so ordering and filtering happen
+ * once in the database rather than by merging eight collections in the app.
+ * The projection is security_invoker, so row-level security on the underlying
+ * tables — not this repository — decides what a caller can see.
+ */
+export interface TimelineRepository {
+  query(q: TimelineQuery): Promise<TimelineEvent[]>;
+  /** Totals per filter group, for the counts beside each filter chip. */
+  countsByKind(q: Pick<TimelineQuery, 'workspaceId' | 'topicId' | 'subtopicId'>): Promise<Record<string, number>>;
+}
+
 /** One end of a relationship, resolved enough to render without a second query. */
 export interface RelatedRecord {
   relationshipId: string;
@@ -363,4 +379,5 @@ export interface DataContext {
   sessions: SourceSessionRepository;
   inbox: InboxRepository;
   relationships: RelationshipRepository;
+  timeline: TimelineRepository;
 }
