@@ -306,7 +306,7 @@ class SupabaseTopics implements TopicRepository {
         this.db.from('file_references').select('*').eq('topic_id', topicId).is('deleted_at', null),
         this.db.from('milestones').select('*').eq('topic_id', topicId).is('deleted_at', null),
         this.db.from('source_sessions').select('*').eq('topic_id', topicId).order('occurred_at', { ascending: false }),
-        this.db.from('prompts').select('*, prompt_versions(*)').eq('topic_id', topicId).is('deleted_at', null),
+        this.db.from('prompts').select('*, prompt_versions!prompt_versions_prompt_id_fkey(*)').eq('topic_id', topicId).is('deleted_at', null),
       ]);
 
     const timeline = ((entries.data ?? []) as Row[]).map(map.toEntry);
@@ -1039,10 +1039,14 @@ class SupabaseIdeas implements IdeaRepository {
 
 class SupabasePrompts implements PromptRepository {
   constructor(private readonly db: SupabaseClient) {}
+  // prompt_versions reaches prompts through two foreign keys — the plain one
+  // and the composite workspace key AD-11 requires — so an unqualified embed is
+  // ambiguous and PostgREST refuses it outright. Naming the constraint pins the
+  // path and stays correct as more keys are added.
   async listForTopic(topicId: string): Promise<Array<{ prompt: Prompt; current: PromptVersion | null }>> {
     const { data, error } = await this.db
       .from('prompts')
-      .select('*, prompt_versions(*)')
+      .select('*, prompt_versions!prompt_versions_prompt_id_fkey(*)')
       .eq('topic_id', topicId)
       .is('deleted_at', null);
     if (error) throw new Error(`list prompts: ${error.message}`);
@@ -1062,7 +1066,7 @@ class SupabasePrompts implements PromptRepository {
   async getWithVersions(id: string): Promise<{ prompt: Prompt; versions: PromptVersion[] } | null> {
     const { data, error } = await this.db
       .from('prompts')
-      .select('*, prompt_versions(*)')
+      .select('*, prompt_versions!prompt_versions_prompt_id_fkey(*)')
       .eq('id', id)
       .maybeSingle();
     if (error) throw new Error(`get prompt: ${error.message}`);

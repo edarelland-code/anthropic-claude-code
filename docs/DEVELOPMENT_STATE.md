@@ -5,17 +5,13 @@
 > `docs/ARCHITECTURE.md`; setup and deployment live in `docs/DEPLOYMENT.md`.
 
 **Last updated:** 2026-08-14
-**Current phase:** Phase 1 — Foundation. **COMPLETE.** All thirteen exit criteria pass, including
-the cross-device acceptance test on two physical machines.
+**Current phase:** Phase 2 — Memory. **Implemented, hosted-validated, pending production deploy.**
 
-Live at **<https://contextshelf.vercel.app>**, backed by Supabase project `omhktzxwffaipmcoljic`.
+Phase 1 is closed and merged (see "Phase 1 — closed" below). Phase 2 work is on
+`phase-2-memory`.
 
-**Phase 2 is unblocked.** Start it on a `phase-2-memory` branch.
-
-One limitation is carried forward rather than closed: the OTP email templates cannot be set on the
-free tier, so a sign-in link stays bound to the device that requested it. Cross-device *data*
-continuity is proven and unaffected; only the sign-in link is device-bound. See "Carried into
-Phase 2".
+Live at **<https://contextshelf.vercel.app>**, backed by Supabase `omhktzxwffaipmcoljic`, now
+carrying migration `0002` — 26 tables, 3 views, 35 policies.
 
 ---
 
@@ -33,9 +29,62 @@ These terms mean exactly this and nothing more:
 | **Production validated** | Verified on the deployed URL against the hosted Supabase project |
 | **Cross-device validated** | The same account was verified on two physical machines |
 
+
 ---
 
-## Where Phase 1 stands — CLOSED
+## Phase 2 — Memory
+
+### What Phase 0 had already built
+
+The audit found that Phase 0 modelled the entire Phase 2 schema: `decisions`, `ideas`, `prompts`,
+`prompt_versions`, `relationships`, and `context_snapshots` all existed with the right columns, and
+`idea_status` already carried the exact six lifecycle states. Phase 1 left the write methods as
+`NotYetImplemented` stubs rather than faking them. Phase 2 was therefore mostly a wire-up, not a
+rebuild, and migration `0002` is additive: it creates one table plus one more for winning
+selections, and drops nothing.
+
+### Schema changes (0002)
+
+| Change | Why |
+|---|---|
+| `decision_status` gains `proposed`, `rejected`, `archived` | The ledger needs a pre-settled state, a turned-down state distinct from superseded, and a filing state. `reversed` is kept — dropping an enum value is destructive |
+| `supersede_decision()` + a CHECK | Rule 7 was unenforced for decisions: the columns existed with neither function nor constraint, so a decision could be superseded with a null reason |
+| `timeline_events` view | The unified Timeline, `security_invoker = true` |
+| `prompt_version_outcomes` | Append-only ratings, so rule 6 stands |
+| `prompt_winning_selections` | Winning identifies a VERSION; history of winner changes survives |
+| Indexes | Timeline ordering, supersession lookups in both directions |
+
+### Design decisions recorded
+
+- **AD-17** — derived read models are views with `security_invoker`, never materialised tables.
+- **AD-18** — judgements about a record are appended, never written onto it.
+- **Rule 6 restated** to name all four history tables.
+- **Rule 9a added** — winning identifies a version, and `prompts.is_winning` is derived by trigger.
+
+### Issues found and fixed
+
+| # | Severity | Issue | Fix |
+|---|---|---|---|
+| 20 | **High — would have leaked** | A view runs as its OWNER unless `security_invoker` is set, reading past RLS on every underlying table. Verified by removing it against a scratch cluster: user B then saw all 8 of user A's rows | `security_invoker = true` on all three views, asserted locally and on hosted |
+| 21 | **High — silent regression** | `prompt_winning_selections` gave PostgREST a second relationship path between `prompts` and `prompt_versions`, so the implicit embed became ambiguous and every prompt read threw. The Topic page failed to render, and with it the forms — subtopics and entries stopped persisting | Embeds name the constraint: `prompt_versions!prompt_versions_prompt_id_fkey` |
+| 22 | Medium | Outcome ordering used `created_at`, but `now()` is fixed for a whole transaction, so two outcomes recorded together tied and "newest" degraded to comparing random uuids | Identity sequence, also immune to clock skew |
+| 23 | **Medium — a check that lied** | `schema-parity.mjs` applied only `0001`, hardcoded, so it compared hosted against a stale reference and reported all 61 new objects as differences | Applies every migration in order |
+| 24 | Medium | Touch targets of 16px on Timeline links at 390/375 | `min-h-11` on both link types |
+| 25 | Low | A Home note promised Phase 2 features that now exist | Rewritten to name only what is still absent |
+
+### Not done in Phase 2
+
+- **`rateVersion` UI.** The repository method exists and is tested; no screen calls it yet.
+- **Relationship editing UI.** `RelationshipRepository` reads and writes; the Topic page does not
+  yet expose linking.
+- **Decision/Idea/Prompt creation forms.** The repositories are implemented and tested against the
+  hosted database; the Topic page still only creates knowledge entries and subtopics.
+
+These are named rather than mocked (rule 14).
+
+---
+
+## Phase 1 — closed
 
 | # | Exit criterion | Status | Evidence |
 |---|---|---|---|

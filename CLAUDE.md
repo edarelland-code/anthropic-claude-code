@@ -32,14 +32,21 @@ These are permanent. Changing one requires the process at the bottom of this fil
 ### History and truth
 5. **Nothing is ever destroyed.** Editing writes a new version. Replacing writes a supersession
    link. Deleting sets `deleted_at` and writes a `deletion_log` row.
-6. **`prompt_versions` and `knowledge_entry_versions` are insert-only** — enforced by the absence
-   of `UPDATE`/`DELETE` RLS policies, not by convention.
+6. **History tables are insert-only** — `prompt_versions`, `knowledge_entry_versions`,
+   `prompt_version_outcomes`, and `prompt_winning_selections`. Enforced by the absence of
+   `UPDATE`/`DELETE` RLS policies, not by convention, and asserted by
+   `hosted/01_verify_schema.sql`. A judgement that changes later (a rating, a winning version) is
+   a new row, never an edit.
 7. **Superseding requires a reason.** `supersedes_reason` / `supersede_reason` is mandatory at the
    supersede action. "Why did we change our mind" is the product.
 8. **Current State is a read, not a store.** `status = 'active' AND superseded_by_id IS NULL` over
    the same append-only table the Timeline reads.
 9. **Rejected and superseded items must appear in generated Resume prompts as an avoid-list, with
    reasons.** This is the feature that stops future Claude sessions re-proposing rejected ideas.
+9a. **"Winning" identifies a prompt VERSION, not a prompt.** Once a prompt has several versions,
+   "which text produced the best result" cannot be answered at prompt level, and the latest
+   version is often a later experiment that did worse. `prompts.is_winning` is derived from the
+   selection history by trigger and must never be written directly.
 
 ### Provenance
 10. **Two layers, always linked.** Layer 1 `source_sessions` = verbatim, immutable evidence.
@@ -106,6 +113,8 @@ These are permanent. Changing one requires the process at the bottom of this fil
 | AD-14 | **`main` is the stable branch; work happens on feature branches** | See the Git workflow below |
 | AD-15 | **Hosted verification runs over the Management API when the Postgres wire protocol is unreachable** | Some environments permit HTTPS but not `:5432`/`:6543`. `db push` and `db diff --linked` then cannot run at all. The migration, the two hosted suites, and schema parity all work over HTTPS instead, so "the hosted database is correct" stays checkable rather than assumed. The CLI path remains preferred wherever it works |
 | AD-16 | **Hosted validation asserts rows in the database, never only rendered text** | A page-content check reported two knowledge entries created while `knowledge_entries` was empty — the submit had hit a different form on the same page and created an action. Text on a page is evidence the app rendered something; only the row is evidence of persistence |
+| AD-17 | **Derived read models are database VIEWS with `security_invoker = true`, never materialised tables** | The Timeline and the prompt outcome/winner projections hold nothing of their own, so they cannot drift from the rows they summarise. `security_invoker` is load-bearing rather than decorative: a view runs as its OWNER by default and would read straight past RLS on every underlying table, serving one workspace's history to another while appearing to work. Asserted, not assumed — removing it makes `04_timeline.test.sql` fail with a real leak |
+| AD-18 | **Judgements about a record are appended, never written onto it** | Prompt outcomes and winning-version selections each live in their own append-only table, ordered by an identity sequence — not by `created_at`, which is fixed for a whole transaction and silently degrades to comparing random uuids. Re-rating appends, so a changed judgement is history rather than an overwrite, exactly as superseding is for decisions. The seeding rule keeps this from becoming two sources of truth: a row is written whenever the parent is created, so the newest row is always the answer with no fallback |
 
 ---
 

@@ -113,11 +113,13 @@ export function TimelineList({
 
               <h3 className="mt-1.5 text-sm font-medium break-words">
                 {href ? (
-                  <Link href={href} className="hover:underline">
+                  // min-h-11 keeps the tap target usable on a phone; the row is
+                  // already tall enough on desktop that this changes nothing there.
+                  <Link href={href} className="inline-flex min-h-11 items-center hover:underline">
                     {event.title}
                   </Link>
                 ) : (
-                  event.title
+                  <span className="inline-flex min-h-11 items-center">{event.title}</span>
                 )}
               </h3>
 
@@ -128,7 +130,7 @@ export function TimelineList({
               {showTopicLink && topicNames?.get(event.topicId) && (
                 <Link
                   href={`/topics/${event.topicId}`}
-                  className="mt-1.5 inline-block text-xs muted hover:underline"
+                  className="mt-1.5 inline-flex min-h-11 items-center text-xs muted hover:underline"
                 >
                   {topicNames.get(event.topicId)}
                 </Link>
