@@ -396,3 +396,36 @@ export function toWinningPrompts(
   }
   return out;
 }
+
+/**
+ * A `context_snapshots` row as a Resume export record.
+ *
+ * `inputs` carries everything the columns do not: size, the sections that were
+ * rendered, the record ids that went into them, freshness and conflict counts.
+ * A jsonb bag is right here precisely because none of it is ever queried or
+ * joined on — it is evidence about one export, read back only by the history
+ * screen.
+ */
+export function toResumeExport(r: Row): {
+  id: string;
+  workspaceId: string;
+  topicId: string;
+  subtopicId: string | null;
+  target: 'claude_chat' | 'claude_cowork' | 'claude_code';
+  density: 'compact' | 'standard' | 'full_audit';
+  generatedAt: string;
+  body: string;
+  meta: Record<string, unknown>;
+} {
+  return {
+    id: str(r.id),
+    workspaceId: str(r.workspace_id),
+    topicId: str(r.topic_id),
+    subtopicId: nstr(r.subtopic_id),
+    target: (nstr(r.target) ?? 'claude_chat') as 'claude_chat' | 'claude_cowork' | 'claude_code',
+    density: (nstr(r.density) ?? 'standard') as 'compact' | 'standard' | 'full_audit',
+    generatedAt: str(r.generated_at),
+    body: str(r.body),
+    meta: (r.inputs ?? {}) as Record<string, unknown>,
+  };
+}

@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { AlertTriangle, ArrowRight, Clock, History, Inbox, Plus, Search } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Clock, History, Inbox, PlayCircle, Plus, Search } from 'lucide-react';
 
 import { TopicCard } from '@/components/topics/topic-card';
 import { TimelineList } from '@/components/timeline/timeline-list';
@@ -98,19 +98,29 @@ export default async function HomePage() {
             <Section title="Continue working" subtitle="Topics with a defined next action">
               <ul className="space-y-2">
                 {continueWorking.map((t) => (
-                  <li key={t.topic.id}>
-                    <Link
-                      href={`/topics/${t.topic.id}`}
-                      className="flex items-start gap-3 rounded-lg p-3.5 surface hover:border-indigo-300 dark:hover:border-indigo-500/40"
-                    >
+                  <li key={t.topic.id} className="flex flex-wrap items-center gap-2 rounded-lg p-3.5 surface">
+                    <Link href={`/topics/${t.topic.id}`} className="flex min-w-0 flex-1 items-start gap-3">
                       <ArrowRight className="mt-0.5 size-4 shrink-0 text-indigo-600 dark:text-indigo-400" aria-hidden />
                       <div className="min-w-0">
                         <p className="truncate text-sm font-medium">{t.topic.name}</p>
                         <p className="mt-0.5 text-sm leading-5 muted">{t.nextAction?.title}</p>
                       </div>
-                      <span className="ml-auto hidden shrink-0 text-xs muted sm:block">
-                        {freshness(t.topic.lastMeaningfulUpdateAt).label}
-                      </span>
+                    </Link>
+                    <span className="hidden shrink-0 text-xs muted sm:block">
+                      {freshness(t.topic.lastMeaningfulUpdateAt).label}
+                    </span>
+                    {/*
+                      Resume sits on the card itself. "Continue working" is
+                      exactly the moment someone wants a continuation prompt,
+                      and making them open the topic first to find it would put
+                      a step in front of the product's payoff.
+                    */}
+                    <Link
+                      href={`/topics/${t.topic.id}/resume`}
+                      className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-md px-3 text-xs font-medium ring-1 ring-inset hairline hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+                    >
+                      <PlayCircle className="size-3.5" aria-hidden />
+                      Resume
                     </Link>
                   </li>
                 ))}

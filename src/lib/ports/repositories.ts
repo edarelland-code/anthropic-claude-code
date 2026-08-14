@@ -10,6 +10,7 @@ import type {
   Action,
   ActionKind,
   ConflictProposal,
+  ContextDensity,
   Decision,
   DecisionStatus,
   DeletableEntityType,
@@ -26,6 +27,7 @@ import type {
   PromptVersion,
   Relationship,
   RelationshipType,
+  ResumeTarget,
   SearchHit,
   SearchQuery,
   SourceSession,
@@ -117,6 +119,22 @@ export interface SubtopicRepository {
   listForTopic(topicId: string): Promise<Subtopic[]>;
   create(input: CreateSubtopicInput): Promise<Subtopic>;
   rename(id: string, name: string, expectedUpdatedAt: string): Promise<Subtopic>;
+  /**
+   * The subtopic's own Resume Trigger, and its state.
+   *
+   * A subtopic needs its own IF/THEN because "what was I doing" is usually a
+   * question about one part of a project rather than the whole of it. Editing
+   * either counts as meaningful work, so `last_meaningful_update_at` moves —
+   * unlike a rename (AD-10).
+   */
+  updateResume(input: {
+    id: string;
+    expectedUpdatedAt: string;
+    currentState?: string | null;
+    goal?: string | null;
+    resumeTriggerIf?: string | null;
+    resumeTriggerThen?: string | null;
+  }): Promise<Subtopic>;
   move(id: string, toTopicId: string, toParentSubtopicId: string | null): Promise<Subtopic>;
   archive(id: string): Promise<void>;
   restore(id: string): Promise<void>;
@@ -237,6 +255,22 @@ export interface IdeaRepository {
 export interface PromptRepository {
   listForTopic(topicId: string): Promise<Array<{ prompt: Prompt; current: PromptVersion | null }>>;
   getWithVersions(id: string): Promise<{ prompt: Prompt; versions: PromptVersion[] } | null>;
+  /**
+   * Every prompt in a topic with all its versions and its winning selection,
+   * in two queries rather than two per prompt.
+   *
+   * The obvious shape — list, then fetch versions and the winner for each — is
+   * an N+1 that grows with the library, and it is what the Prompt page and the
+   * Topic page both used to do.
+   */
+  listWithVersions(topicId: string): Promise<
+    Array<{
+      prompt: Prompt;
+      versions: PromptVersion[];
+      winningVersionId: string | null;
+      winningReason: string | null;
+    }>
+  >;
   create(input: {
     topicId: string;
     subtopicId?: string | null;
@@ -431,6 +465,56 @@ export interface ProposalRepository {
   conflictingDecisions(topicId: string): Promise<ConflictProposal[]>;
 }
 
+/**
+ * One recorded Resume export.
+ *
+ * An AUDIT record and nothing else. Nothing in the assembler can read one of
+ * these back — `assembleResumeContext` takes records and options, and has no
+ * parameter a snapshot could arrive through. A past export says what was handed
+ * to Claude at a moment; it is never evidence about what is true now.
+ *
+ * `is_current` on the underlying table is deliberately left unset and unread.
+ * It predates AD-8 and would imply an authority a derived rendering does not
+ * have.
+ */
+export interface ResumeExport {
+  id: string;
+  workspaceId: string;
+  topicId: string;
+  subtopicId: string | null;
+  target: ResumeTarget;
+  density: ContextDensity;
+  generatedAt: string;
+  body: string;
+  /** Size, sections, freshness, conflicts and the ids that went into it. */
+  meta: {
+    characters?: number;
+    words?: number;
+    approxTokens?: number;
+    sections?: string[];
+    recordIds?: string[];
+    freshness?: string;
+    conflicts?: number;
+    label?: string | null;
+  };
+}
+
+export interface ResumeHistoryRepository {
+  listForTopic(topicId: string, limit?: number): Promise<ResumeExport[]>;
+  getById(id: string): Promise<ResumeExport | null>;
+  record(input: {
+    workspaceId: string;
+    topicId: string;
+    subtopicId?: string | null;
+    target: ResumeTarget;
+    density: ContextDensity;
+    body: string;
+    meta: ResumeExport['meta'];
+  }): Promise<ResumeExport>;
+  /** Snapshots are derived and disposable (AD-8), so clearing history is safe. */
+  remove(id: string): Promise<void>;
+}
+
 /** A tombstone, with enough of the row to recognise what it was. */
 export interface DeletedRecord {
   id: string;
@@ -527,4 +611,5 @@ export interface DataContext {
   search: SearchRepository;
   proposals: ProposalRepository;
   recycle: RecycleRepository;
+  resumeHistory: ResumeHistoryRepository;
 }

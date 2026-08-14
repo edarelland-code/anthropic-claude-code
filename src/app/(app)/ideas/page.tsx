@@ -1,6 +1,7 @@
 import Link from 'next/link';
 
 import { CreateFromSection } from '@/components/topics/create-from-section';
+import { IdeaControls } from '@/components/topics/lifecycle-controls';
 import { getData } from '@/lib/data';
 import type { IdeaStatus, Subtopic } from '@/lib/domain/types';
 import { cn, formatDate } from '@/lib/utils';
@@ -104,6 +105,14 @@ export default async function IdeasPage() {
                           {idea.rationale}
                         </p>
                       )}
+                      {/*
+                        Moving an idea through its lifecycle is what fills the
+                        avoid list. Rejecting requires a reason, which is
+                        appended to the rationale rather than replacing it — a
+                        rejected idea has to keep both why it was suggested and
+                        why it was turned down (rule 9).
+                      */}
+                      <IdeaControls idea={idea} topicId={idea.topicId} />
                     </div>
                   </li>
                 ))}

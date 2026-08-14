@@ -3,6 +3,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type {
   Action,
   ConflictProposal,
+  ContextDensity,
   Decision,
   DeletableEntityType,
   DuplicateProposal,
@@ -16,6 +17,7 @@ import type {
   Prompt,
   PromptVersion,
   Relationship,
+  ResumeTarget,
   SearchHit,
   SearchQuery,
   SourceSession,
@@ -49,6 +51,8 @@ import {
   type ProposalRepository,
   type RecycleRepository,
   type RelatedRecord,
+  type ResumeExport,
+  type ResumeHistoryRepository,
   type RelationshipRepository,
   type SearchRepository,
   type SessionUser,
@@ -503,6 +507,44 @@ class SupabaseSubtopics implements SubtopicRepository {
       .maybeSingle();
     if (error) throw new Error(`rename subtopic: ${error.message}`);
     if (!data) throw new ConflictError('This subtopic changed on another device.', 'subtopic', id);
+    return map.toSubtopic(data as unknown as Row);
+  }
+
+  async updateResume(input: {
+    id: string;
+    expectedUpdatedAt: string;
+    currentState?: string | null;
+    goal?: string | null;
+    resumeTriggerIf?: string | null;
+    resumeTriggerThen?: string | null;
+  }): Promise<Subtopic> {
+    const patch: Record<string, unknown> = {
+      // Recording where the work stands, or what to pick up next, is real
+      // progress — so the freshness clock moves. A rename is not, and does not.
+      last_meaningful_update_at: new Date().toISOString(),
+    };
+    if (input.currentState !== undefined) patch.current_state = input.currentState;
+    if (input.goal !== undefined) patch.goal = input.goal;
+    if (input.resumeTriggerIf !== undefined) patch.resume_trigger_if = input.resumeTriggerIf;
+    if (input.resumeTriggerThen !== undefined) patch.resume_trigger_then = input.resumeTriggerThen;
+
+    const { data, error } = await this.db
+      .from('subtopics')
+      .update(patch)
+      .eq('id', input.id)
+      // Optimistic concurrency: another device's write wins visibly rather
+      // than being clobbered (rule 16).
+      .eq('updated_at', input.expectedUpdatedAt)
+      .select('*')
+      .maybeSingle();
+    if (error) throw new Error(`update subtopic: ${error.message}`);
+    if (!data) {
+      throw new ConflictError(
+        'This subtopic changed somewhere else while you were editing. Reload and try again.',
+        'subtopic',
+        input.id,
+      );
+    }
     return map.toSubtopic(data as unknown as Row);
   }
 
@@ -1072,6 +1114,45 @@ class SupabasePrompts implements PromptRepository {
       return { prompt: map.toPrompt(row), current: versions[0] ?? null };
     });
   }
+  async listWithVersions(topicId: string): Promise<
+    Array<{ prompt: Prompt; versions: PromptVersion[]; winningVersionId: string | null; winningReason: string | null }>
+  > {
+    const [prompts, winning, outcomes] = await Promise.all([
+      this.db
+        .from('prompts')
+        .select('*, prompt_versions!prompt_versions_prompt_id_fkey(*)')
+        .eq('topic_id', topicId)
+        .is('deleted_at', null),
+      this.db.from('prompt_current_winning').select('*'),
+      this.db.from('prompt_version_current_outcome').select('*'),
+    ]);
+    if (prompts.error) throw new Error(`list prompts: ${prompts.error.message}`);
+
+    // Outcomes are authoritative over the seed columns on the version row
+    // (migration 0002 §4), so they are overlaid once here rather than per row.
+    const outcomeByVersion = new Map<string, Row>();
+    for (const o of (outcomes.data ?? []) as Row[]) {
+      outcomeByVersion.set(String(o.prompt_version_id), o);
+    }
+    const winningByPrompt = new Map<string, Row>();
+    for (const w of (winning.data ?? []) as Row[]) winningByPrompt.set(String(w.prompt_id), w);
+
+    return ((prompts.data ?? []) as Row[]).map((r) => {
+      const selection = winningByPrompt.get(String(r.id));
+      const versions = Array.isArray(r.prompt_versions)
+        ? (r.prompt_versions as Row[])
+            .map((v) => map.toPromptVersion(overlay(v, outcomeByVersion)))
+            .sort((a, b) => b.version - a.version)
+        : [];
+      return {
+        prompt: map.toPrompt(r),
+        versions,
+        winningVersionId: selection ? String(selection.prompt_version_id) : null,
+        winningReason: (selection?.reason as string | null) ?? null,
+      };
+    });
+  }
+
   async getWithVersions(id: string): Promise<{ prompt: Prompt; versions: PromptVersion[] } | null> {
     const { data, error } = await this.db
       .from('prompts')
@@ -2211,6 +2292,82 @@ class SupabaseRecycle implements RecycleRepository {
   }
 }
 
+/**
+ * Resume History.
+ *
+ * Writes only, plus a read for the history screen. There is deliberately no
+ * method here that the assembler could call: `assembleResumeContext` takes
+ * records and options and cannot reach a snapshot, so a past export can never
+ * become an input to the next one.
+ *
+ * `is_current` is left unset. It predates AD-8 and setting it would imply a
+ * derived rendering has authority over the records it was derived from.
+ */
+class SupabaseResumeHistory implements ResumeHistoryRepository {
+  constructor(private readonly db: SupabaseClient) {}
+
+  async listForTopic(topicId: string, limit = 25): Promise<ResumeExport[]> {
+    const { data, error } = await this.db
+      .from('context_snapshots')
+      .select('*')
+      .eq('topic_id', topicId)
+      .order('generated_at', { ascending: false })
+      .limit(limit);
+    if (error) throw new Error(`list resume history: ${error.message}`);
+    return ((data ?? []) as Row[]).map((r) => map.toResumeExport(r) as ResumeExport);
+  }
+
+  async getById(id: string): Promise<ResumeExport | null> {
+    const { data, error } = await this.db
+      .from('context_snapshots')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(`get resume export: ${error.message}`);
+    return data ? (map.toResumeExport(data as unknown as Row) as ResumeExport) : null;
+  }
+
+  async record(input: {
+    workspaceId: string;
+    topicId: string;
+    subtopicId?: string | null;
+    target: ResumeTarget;
+    density: ContextDensity;
+    body: string;
+    meta: ResumeExport['meta'];
+  }): Promise<ResumeExport> {
+    const { data: userRes } = await this.db.auth.getUser();
+    const userId = userRes.user?.id;
+    if (!userId) throw new Error('record resume: not signed in');
+
+    const res = await this.db
+      .from('context_snapshots')
+      .insert({
+        workspace_id: input.workspaceId,
+        topic_id: input.topicId,
+        subtopic_id: input.subtopicId ?? null,
+        user_id: userId,
+        density: input.density,
+        target: input.target,
+        body: input.body,
+        inputs: input.meta,
+        is_current: false,
+      })
+      .select('*')
+      .single();
+    return map.toResumeExport(unwrap(res, 'record resume')) as ResumeExport;
+  }
+
+  async remove(id: string): Promise<void> {
+    // A hard delete, and correct: a snapshot is derived and regenerable
+    // (AD-8), so there is nothing to preserve. This is also why
+    // `soft_delete_record()` refuses context_snapshot — there is no tombstone
+    // worth writing for a rendering that can be produced again.
+    const { error } = await this.db.from('context_snapshots').delete().eq('id', id);
+    if (error) throw new Error(`delete resume export: ${error.message}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 export function createDataContext(db: SupabaseClient): DataContext {
@@ -2232,6 +2389,7 @@ export function createDataContext(db: SupabaseClient): DataContext {
     search: new SupabaseSearch(db),
     proposals: new SupabaseProposals(db),
     recycle: new SupabaseRecycle(db),
+    resumeHistory: new SupabaseResumeHistory(db),
   };
 }
 

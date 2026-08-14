@@ -243,7 +243,6 @@ export function milestone(over: Partial<Milestone>): Milestone {
     detail: null,
     achievedAt: ago(20),
     status: 'achieved',
-    createdAt: ago(25),
     ...over,
   };
 }
