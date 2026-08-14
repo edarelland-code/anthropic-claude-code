@@ -7,6 +7,7 @@
 import type {
   Action,
   Decision,
+  EntityType,
   FileReference,
   Idea,
   IngestionRecord,
@@ -14,8 +15,11 @@ import type {
   Milestone,
   Prompt,
   PromptVersion,
+  RecordState,
   Relationship,
+  SearchHit,
   SourceSession,
+  SourceType,
   TimelineEvent,
   Subtopic,
   Topic,
@@ -258,6 +262,7 @@ export function toIngestionRecord(r: Row): IngestionRecord {
     subtopicId: nstr(r.subtopic_id),
     status: (nstr(r.status) ?? 'unsorted') as IngestionRecord['status'],
     error: nstr(r.error),
+    createdSourceSessionId: nstr(r.created_source_session_id),
     createdEntryIds: strArray(r.created_entry_ids),
     createdAt: str(r.created_at),
     processedAt: nstr(r.processed_at),
@@ -293,5 +298,55 @@ export function toTimelineEvent(r: Row): TimelineEvent {
     supersededById: nstr(r.superseded_by_id),
     occurredAt: str(r.occurred_at),
     createdAt: str(r.created_at),
+  };
+}
+
+/**
+ * A row of the `search_documents` projection.
+ *
+ * `rank` is computed by the query rather than stored, so it arrives alongside
+ * the projected columns; a hit read outside a ranked query reports 0.
+ */
+export function toSearchHit(r: Row): SearchHit {
+  return {
+    entityType: (nstr(r.entity_type) ?? 'knowledge_entry') as EntityType,
+    id: str(r.entity_id),
+    workspaceId: str(r.workspace_id),
+    topicId: nstr(r.topic_id),
+    subtopicId: nstr(r.subtopic_id),
+    title: str(r.title) || 'Untitled',
+    snippet: nstr(r.snippet),
+    sourceType: nstr(r.source_type) as SourceType | null,
+    kind: str(r.kind),
+    status: nstr(r.status),
+    recordState: (nstr(r.record_state) ?? 'current') as RecordState,
+    occurredAt: str(r.occurred_at),
+    rank: num(r.rank),
+  };
+}
+
+/** A `deletion_log` tombstone, with a label recovered from its snapshot. */
+export function toDeletedRecord(r: Row): {
+  id: string;
+  workspaceId: string;
+  entityType: EntityType;
+  entityId: string;
+  title: string;
+  reason: string | null;
+  deletedAt: string;
+  restoredAt: string | null;
+} {
+  const snapshot = (r.snapshot ?? {}) as Row;
+  return {
+    id: str(r.id),
+    workspaceId: str(r.workspace_id),
+    entityType: (nstr(r.entity_type) ?? 'knowledge_entry') as EntityType,
+    entityId: str(r.entity_id),
+    // The snapshot is the whole row, so the label survives even though the
+    // live record is hidden from every list query.
+    title: nstr(snapshot.title) ?? nstr(snapshot.name) ?? nstr(snapshot.display_name) ?? 'Untitled',
+    reason: nstr(r.reason),
+    deletedAt: str(r.created_at),
+    restoredAt: nstr(r.restored_at),
   };
 }

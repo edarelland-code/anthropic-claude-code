@@ -2,16 +2,22 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 import type {
   Action,
+  ConflictProposal,
   Decision,
+  DeletableEntityType,
+  DuplicateProposal,
   EntityType,
   FileReference,
   Idea,
   IngestionRecord,
+  IngestionStatus,
   KnowledgeEntry,
   Milestone,
   Prompt,
   PromptVersion,
   Relationship,
+  SearchHit,
+  SearchQuery,
   SourceSession,
   SourceType,
   TimelineEvent,
@@ -26,6 +32,8 @@ import type {
 import {
   ConflictError,
   type ActionRepository,
+  type ConfirmedSegment,
+  type DeletedRecord,
   type AuthPort,
   type CreateEntryInput,
   type CreateSubtopicInput,
@@ -38,8 +46,11 @@ import {
   type InboxRepository,
   type KnowledgeRepository,
   type PromptRepository,
+  type ProposalRepository,
+  type RecycleRepository,
   type RelatedRecord,
   type RelationshipRepository,
+  type SearchRepository,
   type SessionUser,
   type TimelineRepository,
   type SourceSessionRepository,
@@ -48,6 +59,8 @@ import {
   type UpdateTopicInput,
   type WorkspaceRepository,
 } from '@/lib/ports/repositories';
+
+import { contentFingerprint, entryFingerprint, similarity } from '@/lib/ingestion/fingerprint';
 
 import * as map from './mappers';
 
@@ -69,14 +82,6 @@ function overlay(version: Row, outcomes: Map<string, Row>): Row {
     notes: o.notes ?? version.notes,
     output_summary: o.output_summary ?? version.output_summary,
   };
-}
-
-/** Phase gate: never silently no-op a write that is not built yet (CLAUDE.md rule 14). */
-class NotYetImplemented extends Error {
-  constructor(what: string, phase: number) {
-    super(`${what} lands in Phase ${phase}. It is not implemented yet.`);
-    this.name = 'NotYetImplemented';
-  }
 }
 
 /**
@@ -1398,17 +1403,84 @@ class SupabasePrompts implements PromptRepository {
 
 class SupabaseFiles implements FileRepository {
   constructor(private readonly db: SupabaseClient) {}
+
   async listForTopic(topicId: string): Promise<FileReference[]> {
     const { data, error } = await this.db
       .from('file_references')
       .select('*')
       .eq('topic_id', topicId)
-      .is('deleted_at', null);
+      .is('deleted_at', null)
+      .order('created_at', { ascending: false });
     if (error) throw new Error(`list files: ${error.message}`);
     return (data ?? []).map((r) => map.toFileReference(r as Row));
   }
-  async create(): Promise<FileReference> {
-    throw new NotYetImplemented('File references', 3);
+
+  async listForWorkspace(
+    workspaceId: string,
+    kinds?: FileReference['kind'][],
+  ): Promise<FileReference[]> {
+    let sel = this.db
+      .from('file_references')
+      .select('*')
+      .eq('workspace_id', workspaceId)
+      .is('deleted_at', null);
+    if (kinds?.length) sel = sel.in('kind', kinds);
+    const { data, error } = await sel.order('created_at', { ascending: false });
+    if (error) throw new Error(`list files: ${error.message}`);
+    return (data ?? []).map((r) => map.toFileReference(r as Row));
+  }
+
+  /**
+   * Records a reference to a file or a URL.
+   *
+   * A reference, emphatically — the bytes are not copied and the page is not
+   * fetched. `storage_path` exists in the schema for a future upload path and
+   * stays null here rather than being filled with something that looks like an
+   * upload but is not one.
+   */
+  async create(input: {
+    topicId: string;
+    subtopicId?: string | null;
+    kind: FileReference['kind'];
+    path?: string | null;
+    url?: string | null;
+    displayName?: string | null;
+    repoUrl?: string | null;
+    branch?: string | null;
+    commitSha?: string | null;
+    sourceSessionId?: string | null;
+  }): Promise<FileReference> {
+    const { data: topic, error: topicErr } = await this.db
+      .from('topics')
+      .select('workspace_id')
+      .eq('id', input.topicId)
+      .single();
+    if (topicErr) throw new Error(`create file: ${topicErr.message}`);
+
+    const { data: userRes } = await this.db.auth.getUser();
+    const userId = userRes.user?.id;
+    if (!userId) throw new Error('create file: not signed in');
+
+    const res = await this.db
+      .from('file_references')
+      .insert({
+        workspace_id: (topic as Row).workspace_id,
+        topic_id: input.topicId,
+        subtopic_id: input.subtopicId ?? null,
+        user_id: userId,
+        kind: input.kind,
+        path: input.path ?? null,
+        url: input.url ?? null,
+        display_name: input.displayName ?? null,
+        repo_url: input.repoUrl ?? null,
+        branch: input.branch ?? null,
+        commit_sha: input.commitSha ?? null,
+        source_session_id: input.sourceSessionId ?? null,
+        last_seen_at: new Date().toISOString(),
+      })
+      .select('*')
+      .single();
+    return map.toFileReference(unwrap(res, 'create file'));
   }
 }
 
@@ -1428,32 +1500,237 @@ class SupabaseSessions implements SourceSessionRepository {
     if (error) throw new Error(`get session: ${error.message}`);
     return data ? map.toSourceSession(data as unknown as Row) : null;
   }
-  async create(): Promise<SourceSession> {
-    throw new NotYetImplemented('Recording source sessions', 3);
+  async listForWorkspace(workspaceId: string, limit = 100): Promise<SourceSession[]> {
+    const { data, error } = await this.db
+      .from('source_sessions')
+      .select('*')
+      .eq('workspace_id', workspaceId)
+      .order('occurred_at', { ascending: false })
+      .limit(limit);
+    if (error) throw new Error(`list sessions: ${error.message}`);
+    return (data ?? []).map((r) => map.toSourceSession(r as Row));
+  }
+
+  /**
+   * Writes Layer 1 directly.
+   *
+   * Almost nothing should call this: an import writes its session inside
+   * `persist_ingestion` so the evidence and the entries it produced land in one
+   * transaction. This exists for a session recorded on its own, with no
+   * extraction, and it still never edits — Layer 1 is written once (rule 10).
+   */
+  async create(input: Omit<SourceSession, 'id' | 'createdAt'> & { id?: string }): Promise<SourceSession> {
+    const { data: userRes } = await this.db.auth.getUser();
+    const userId = userRes.user?.id;
+    if (!userId) throw new Error('create session: not signed in');
+
+    const res = await this.db
+      .from('source_sessions')
+      .insert({
+        ...(input.id ? { id: input.id } : {}),
+        workspace_id: input.workspaceId,
+        user_id: userId,
+        topic_id: input.topicId,
+        source_type: input.sourceType,
+        title: input.title,
+        external_url: input.externalUrl,
+        occurred_at: input.occurredAt,
+        summary: input.summary,
+        raw_content: input.rawContent,
+        repo_url: input.repoUrl,
+        branch: input.branch,
+        commit_sha: input.commitSha,
+      })
+      .select('*')
+      .single();
+    return map.toSourceSession(unwrap(res, 'create session'));
   }
 }
 
+/**
+ * The Inbox, and the one write path an import takes.
+ *
+ * Reads are ordinary table reads. Writes that touch more than one table go
+ * through `persist_ingestion`, because the Inbox record, the Layer 1 session
+ * and the Layer 2 entries have to land together or not at all — PostgREST
+ * cannot span calls transactionally, so a half-written import would otherwise
+ * be reachable (ARCHITECTURE §9 stage 3).
+ */
 class SupabaseInbox implements InboxRepository {
   constructor(private readonly db: SupabaseClient) {}
-  async list(workspaceId: string, status?: IngestionRecord['status']): Promise<IngestionRecord[]> {
+
+  async list(workspaceId: string, statuses?: IngestionStatus[]): Promise<IngestionRecord[]> {
     let sel = this.db
       .from('ingestion_records')
       .select('*')
       .eq('workspace_id', workspaceId)
       .order('created_at', { ascending: false });
-    if (status) sel = sel.eq('status', status);
+    if (statuses?.length) sel = sel.in('status', statuses);
     const { data, error } = await sel;
     if (error) throw new Error(`list inbox: ${error.message}`);
     return (data ?? []).map((r) => map.toIngestionRecord(r as Row));
   }
-  async capture(): Promise<IngestionRecord> {
-    throw new NotYetImplemented('Inbox capture', 3);
+
+  async getById(id: string): Promise<IngestionRecord | null> {
+    const { data, error } = await this.db
+      .from('ingestion_records')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(`get inbox item: ${error.message}`);
+    return data ? map.toIngestionRecord(data as unknown as Row) : null;
   }
-  async assign(): Promise<IngestionRecord> {
-    throw new NotYetImplemented('Inbox triage', 3);
+
+  async countsByStatus(workspaceId: string): Promise<Record<string, number>> {
+    const { data, error } = await this.db
+      .from('ingestion_records')
+      .select('status')
+      .eq('workspace_id', workspaceId);
+    if (error) throw new Error(`inbox counts: ${error.message}`);
+    const counts: Record<string, number> = {};
+    for (const row of (data ?? []) as Row[]) {
+      const status = String(row.status);
+      counts[status] = (counts[status] ?? 0) + 1;
+    }
+    return counts;
   }
-  async discard(): Promise<void> {
-    throw new NotYetImplemented('Inbox triage', 3);
+
+  /**
+   * Quick Capture. One insert, no joins, nothing required but the content.
+   *
+   * Deliberately NOT routed through `persist_ingestion`: that function exists
+   * for the multi-table case, and making capture pay for a transaction it does
+   * not need would put latency in front of the one interaction that has to feel
+   * instant.
+   */
+  async capture(input: {
+    workspaceId: string;
+    rawContent: string;
+    sourceType?: SourceType;
+    contentType?: string;
+    adapterId?: string | null;
+    sourceHint?: string | null;
+    topicId?: string | null;
+  }): Promise<IngestionRecord> {
+    const { data: userRes } = await this.db.auth.getUser();
+    const userId = userRes.user?.id;
+    if (!userId) throw new Error('capture: not signed in');
+
+    const res = await this.db
+      .from('ingestion_records')
+      .insert({
+        workspace_id: input.workspaceId,
+        user_id: userId,
+        adapter_id: input.adapterId ?? 'manual-note',
+        source_type: input.sourceType ?? 'manual',
+        content_type: input.contentType ?? 'text',
+        raw_content: input.rawContent,
+        source_hint: input.sourceHint ?? null,
+        topic_id: input.topicId ?? null,
+        status: 'unsorted',
+      })
+      .select('*')
+      .single();
+    return map.toIngestionRecord(unwrap(res, 'capture'));
+  }
+
+  /**
+   * Files an item that is already in the Inbox.
+   *
+   * The original capture is kept and superseded by the processed one rather
+   * than rewritten in place: `persist_ingestion` writes a new record carrying
+   * the session and entry links, and this marks the original archived with a
+   * pointer to it. Nothing is destroyed (rule 5), and the audit trail shows
+   * both what arrived and what was made of it.
+   */
+  async process(input: {
+    id: string;
+    topicId: string;
+    subtopicId?: string | null;
+    segments: ConfirmedSegment[];
+    title?: string | null;
+    occurredAt?: string | null;
+    externalUrl?: string | null;
+  }): Promise<IngestionRecord> {
+    const existing = await this.getById(input.id);
+    if (!existing) throw new Error('process: that captured item is no longer available');
+
+    const created = await this.ingest({
+      workspaceId: existing.workspaceId,
+      adapterId: existing.adapterId ?? 'manual-note',
+      sourceType: existing.sourceType,
+      contentType: existing.contentType,
+      raw: existing.rawContent ?? '',
+      title: input.title ?? existing.sourceHint,
+      occurredAt: input.occurredAt ?? null,
+      externalUrl: input.externalUrl ?? null,
+      topicId: input.topicId,
+      subtopicId: input.subtopicId ?? null,
+      segments: input.segments,
+    });
+
+    const { error } = await this.db
+      .from('ingestion_records')
+      .update({ status: 'archived', topic_id: input.topicId, processed_at: new Date().toISOString() })
+      .eq('id', input.id);
+    if (error) throw new Error(`process: ${error.message}`);
+
+    return created;
+  }
+
+  /** Files a fresh import in one transaction, with no Inbox round trip. */
+  async ingest(input: {
+    workspaceId: string;
+    adapterId: string;
+    sourceType: SourceType;
+    contentType?: string;
+    raw: string;
+    payload?: Record<string, unknown> | null;
+    title?: string | null;
+    occurredAt?: string | null;
+    externalUrl?: string | null;
+    topicId?: string | null;
+    subtopicId?: string | null;
+    segments: ConfirmedSegment[];
+    code?: Record<string, unknown> | null;
+  }): Promise<IngestionRecord> {
+    const { data, error } = await this.db.rpc('persist_ingestion', {
+      p_workspace_id: input.workspaceId,
+      p_adapter_id: input.adapterId,
+      p_source_type: input.sourceType,
+      p_content_type: input.contentType ?? 'text',
+      p_raw: input.raw,
+      p_payload: input.payload ?? {},
+      p_title: input.title ?? null,
+      p_occurred_at: input.occurredAt ?? null,
+      p_external_url: input.externalUrl ?? null,
+      p_topic_id: input.topicId ?? null,
+      p_subtopic_id: input.subtopicId ?? null,
+      p_segments: input.segments.map((s) => ({
+        knowledgeType: s.knowledgeType,
+        title: s.title,
+        content: s.content ?? null,
+        sourceReference: s.sourceReference ?? null,
+        occurredAt: s.occurredAt ?? null,
+        confidence: s.confidence ?? null,
+      })),
+      p_code: input.code ?? null,
+    });
+    if (error) throw new Error(`import: ${error.message}`);
+
+    const record = await this.getById(String(data));
+    if (!record) throw new Error('import: the imported item could not be read back');
+    return record;
+  }
+
+  async setStatus(id: string, status: IngestionStatus): Promise<IngestionRecord> {
+    const res = await this.db
+      .from('ingestion_records')
+      .update({ status })
+      .eq('id', id)
+      .select('*')
+      .single();
+    return map.toIngestionRecord(unwrap(res, 'update inbox item'));
   }
 }
 
@@ -1654,6 +1931,282 @@ class SupabaseTimeline implements TimelineRepository {
   }
 }
 
+/**
+ * Universal search.
+ *
+ * Every read goes through `search_records` / `search_type_counts`, which are
+ * `security invoker` functions over a `security_invoker` view. Row-level
+ * security on the twelve underlying tables — not this class — decides what a
+ * caller can see, and the explicit `workspaceId` argument means a policy
+ * regression shows up as zero results rather than as a leak.
+ *
+ * Ranking is the database's, so the search page, the Topic page and any future
+ * caller cannot disagree about what "best match" means.
+ */
+class SupabaseSearch implements SearchRepository {
+  constructor(private readonly db: SupabaseClient) {}
+
+  async query(q: SearchQuery): Promise<SearchHit[]> {
+    if (!q.text.trim()) return [];
+    const { data, error } = await this.db.rpc('search_records', {
+      p_workspace_id: q.workspaceId,
+      p_query: q.text,
+      p_entity_types: q.entityTypes?.length ? q.entityTypes : null,
+      p_kinds: q.kinds?.length ? q.kinds : null,
+      p_source_types: q.sourceTypes?.length ? q.sourceTypes : null,
+      p_topic_id: q.topicId ?? null,
+      p_record_states: q.recordStates?.length ? q.recordStates : null,
+      p_since: q.since ?? null,
+      p_until: q.until ?? null,
+      p_limit: q.limit ?? 50,
+      p_offset: q.offset ?? 0,
+    });
+    if (error) throw new Error(`search: ${error.message}`);
+    return ((data ?? []) as Row[]).map(map.toSearchHit);
+  }
+
+  async countsByType(q: SearchQuery): Promise<Record<string, number>> {
+    if (!q.text.trim()) return {};
+    const { data, error } = await this.db.rpc('search_type_counts', {
+      p_workspace_id: q.workspaceId,
+      p_query: q.text,
+      p_source_types: q.sourceTypes?.length ? q.sourceTypes : null,
+      p_topic_id: q.topicId ?? null,
+      p_record_states: q.recordStates?.length ? q.recordStates : null,
+      p_since: q.since ?? null,
+      p_until: q.until ?? null,
+    });
+    if (error) throw new Error(`search counts: ${error.message}`);
+    const counts: Record<string, number> = {};
+    for (const row of (data ?? []) as Row[]) {
+      counts[String(row.entity_type)] = Number(row.n ?? 0);
+    }
+    return counts;
+  }
+}
+
+/**
+ * Duplicate and conflict PROPOSALS (rule 17).
+ *
+ * Everything here reads. There is no method on this class that merges, links or
+ * supersedes, and that is not an oversight — acting on a proposal is a separate
+ * call the user triggers, through `supersede_entry` or an explicit relationship
+ * edge, so an accidental auto-merge is not expressible.
+ */
+class SupabaseProposals implements ProposalRepository {
+  constructor(private readonly db: SupabaseClient) {}
+
+  async duplicatesForText(input: {
+    workspaceId: string;
+    title: string;
+    content?: string | null;
+    excludeEntryId?: string;
+  }): Promise<DuplicateProposal[]> {
+    const combined = `${input.title} ${input.content ?? ''}`;
+    const hash = entryFingerprint(input.title, input.content ?? null);
+
+    // A window, not the whole table: near-duplicates are compared in
+    // TypeScript, so the candidate set has to stay small enough to be honest
+    // about. Exact matches below are found by hash regardless of this bound.
+    let sel = this.db
+      .from('knowledge_entries')
+      .select('id, title, content, content_hash, occurred_at')
+      .eq('workspace_id', input.workspaceId)
+      .is('deleted_at', null)
+      .order('occurred_at', { ascending: false })
+      .limit(400);
+    if (input.excludeEntryId) sel = sel.neq('id', input.excludeEntryId);
+
+    const { data, error } = await sel;
+    if (error) throw new Error(`duplicate check: ${error.message}`);
+
+    const proposals: DuplicateProposal[] = [];
+    for (const row of (data ?? []) as Row[]) {
+      const candidateTitle = String(row.title ?? '');
+      const exact = hash !== null && row.content_hash === hash;
+      const score = exact
+        ? 1
+        : similarity(combined, `${candidateTitle} ${String(row.content ?? '')}`);
+      // 0.82 is a display threshold: below it the two texts are different
+      // enough that showing them side by side wastes the user's attention.
+      // Nothing acts on this number — crossing it only decides whether a
+      // proposal is worth putting in front of someone.
+      if (!exact && score < 0.82) continue;
+      proposals.push({
+        basis: exact ? 'exact' : 'similar',
+        entityType: 'knowledge_entry',
+        candidateId: String(row.id),
+        candidateTitle: candidateTitle || 'Untitled',
+        candidateOccurredAt: String(row.occurred_at ?? ''),
+        similarity: score,
+        reason: exact
+          ? 'The content is identical apart from formatting.'
+          : `The wording is ${Math.round(score * 100)}% similar.`,
+      });
+    }
+    return proposals
+      .sort((a, b) => b.similarity - a.similarity)
+      .slice(0, 5);
+  }
+
+  async duplicateSources(input: {
+    workspaceId: string;
+    raw?: string | null;
+    externalUrl?: string | null;
+    commitSha?: string | null;
+  }): Promise<DuplicateProposal[]> {
+    const proposals: DuplicateProposal[] = [];
+    const seen = new Set<string>();
+
+    const add = (row: Row, basis: DuplicateProposal['basis'], reason: string) => {
+      const id = String(row.id);
+      if (seen.has(id)) return;
+      seen.add(id);
+      proposals.push({
+        basis,
+        entityType: 'source_session',
+        candidateId: id,
+        candidateTitle: String(row.title ?? 'Session'),
+        candidateOccurredAt: String(row.occurred_at ?? ''),
+        similarity: 1,
+        reason,
+      });
+    };
+
+    const hash = contentFingerprint(input.raw ?? null);
+    if (hash) {
+      const { data, error } = await this.db
+        .from('source_sessions')
+        .select('id, title, occurred_at')
+        .eq('workspace_id', input.workspaceId)
+        .eq('raw_hash', hash)
+        .limit(5);
+      if (error) throw new Error(`duplicate source check: ${error.message}`);
+      for (const row of (data ?? []) as Row[]) {
+        add(row, 'exact', 'This exact transcript has already been imported.');
+      }
+    }
+
+    if (input.externalUrl) {
+      const { data, error } = await this.db
+        .from('source_sessions')
+        .select('id, title, occurred_at')
+        .eq('workspace_id', input.workspaceId)
+        .eq('external_url', input.externalUrl)
+        .limit(5);
+      if (error) throw new Error(`duplicate source check: ${error.message}`);
+      for (const row of (data ?? []) as Row[]) {
+        add(row, 'same_source', 'A session with the same source link was imported before.');
+      }
+    }
+
+    if (input.commitSha) {
+      const { data, error } = await this.db
+        .from('source_sessions')
+        .select('id, title, occurred_at')
+        .eq('workspace_id', input.workspaceId)
+        .eq('commit_sha', input.commitSha)
+        .limit(5);
+      if (error) throw new Error(`duplicate source check: ${error.message}`);
+      for (const row of (data ?? []) as Row[]) {
+        add(row, 'same_source', 'The same commit was recorded before.');
+      }
+    }
+
+    return proposals;
+  }
+
+  /**
+   * Active decisions in one topic that appear to say different things about
+   * the same subject.
+   *
+   * Compares titles only. A decision's title is the handle the user chose for
+   * it, so two similar titles is a question worth asking; two similar bodies is
+   * often just two decisions in the same area. Every pair is reported once.
+   */
+  async conflictingDecisions(topicId: string): Promise<ConflictProposal[]> {
+    const { data, error } = await this.db
+      .from('decisions')
+      .select('id, title, decision')
+      .eq('topic_id', topicId)
+      .eq('status', 'active')
+      .is('superseded_by_id', null)
+      .is('deleted_at', null)
+      .order('decided_at', { ascending: false })
+      .limit(200);
+    if (error) throw new Error(`conflict check: ${error.message}`);
+
+    const rows = (data ?? []) as Row[];
+    const out: ConflictProposal[] = [];
+    for (let i = 0; i < rows.length; i += 1) {
+      for (let j = i + 1; j < rows.length; j += 1) {
+        const a = rows[i]!;
+        const b = rows[j]!;
+        const score = similarity(String(a.title ?? ''), String(b.title ?? ''));
+        if (score < 0.75) continue;
+        out.push({
+          decisionId: String(a.id),
+          decisionTitle: String(a.title ?? 'Untitled'),
+          conflictsWithId: String(b.id),
+          conflictsWithTitle: String(b.title ?? 'Untitled'),
+          similarity: score,
+          reason:
+            'Both are active decisions with near-identical titles. If one replaced the other, supersede it so the reason is recorded.',
+        });
+      }
+    }
+    return out.sort((x, y) => y.similarity - x.similarity).slice(0, 10);
+  }
+}
+
+/**
+ * Soft delete and recovery.
+ *
+ * Both writes are single RPC calls, because the row update and its tombstone
+ * have to be one transaction — a deletion with no tombstone is unrecoverable,
+ * and a tombstone with no deletion is a lie. The allowlist lives in the
+ * database; `DeletableEntityType` here only stops the UI offering a button that
+ * is going to raise.
+ */
+class SupabaseRecycle implements RecycleRepository {
+  constructor(private readonly db: SupabaseClient) {}
+
+  async list(workspaceId: string, includeRestored = false): Promise<DeletedRecord[]> {
+    let sel = this.db
+      .from('deletion_log')
+      .select('*')
+      .eq('workspace_id', workspaceId)
+      .order('created_at', { ascending: false })
+      .limit(200);
+    if (!includeRestored) sel = sel.is('restored_at', null);
+    const { data, error } = await sel;
+    if (error) throw new Error(`list deleted records: ${error.message}`);
+    return ((data ?? []) as Row[]).map(map.toDeletedRecord);
+  }
+
+  async softDelete(
+    entityType: DeletableEntityType,
+    entityId: string,
+    reason?: string | null,
+  ): Promise<string> {
+    const { data, error } = await this.db.rpc('soft_delete_record', {
+      p_entity_type: entityType,
+      p_entity_id: entityId,
+      p_reason: reason ?? null,
+    });
+    if (error) throw new Error(`delete: ${error.message}`);
+    return String(data);
+  }
+
+  async restore(deletionLogId: string): Promise<string> {
+    const { data, error } = await this.db.rpc('restore_record', {
+      p_deletion_log_id: deletionLogId,
+    });
+    if (error) throw new Error(`restore: ${error.message}`);
+    return String(data);
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 export function createDataContext(db: SupabaseClient): DataContext {
@@ -1672,6 +2225,9 @@ export function createDataContext(db: SupabaseClient): DataContext {
     inbox: new SupabaseInbox(db),
     relationships: new SupabaseRelationships(db),
     timeline: new SupabaseTimeline(db),
+    search: new SupabaseSearch(db),
+    proposals: new SupabaseProposals(db),
+    recycle: new SupabaseRecycle(db),
   };
 }
 

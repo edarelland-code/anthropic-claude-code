@@ -171,11 +171,12 @@ checks as (
 
   union all
   select 17, 'Phase 3 functions',
-         count(*)::text || ' / 4',
-         case when count(*) = 4 then 'PASS' else 'FAIL' end
+         count(*)::text || ' / 6',
+         case when count(*) = 6 then 'PASS' else 'FAIL' end
   from pg_proc p join pg_namespace n on n.oid = p.pronamespace
   where n.nspname='public' and p.proname in (
-    'content_fingerprint','persist_ingestion','soft_delete_record','restore_record')
+    'content_fingerprint','persist_ingestion','soft_delete_record','restore_record',
+    'search_records','search_type_counts')
 
   union all
   -- Writing through a definer function would let a caller name any workspace
@@ -183,10 +184,11 @@ checks as (
   select 18, 'capture functions are security invoker',
          coalesce(string_agg(p.proname || ':' ||
            case when p.prosecdef then 'definer' else 'invoker' end, ', '), '(none found)'),
-         case when count(*) = 3 and count(*) filter (where p.prosecdef) = 0 then 'PASS'
-              else 'FAIL — a write path bypasses the caller''s row-level security' end
+         case when count(*) = 5 and count(*) filter (where p.prosecdef) = 0 then 'PASS'
+              else 'FAIL — a write or search path bypasses the caller''s row-level security' end
   from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-  where n.nspname='public' and p.proname in ('persist_ingestion','soft_delete_record','restore_record')
+  where n.nspname='public' and p.proname in ('persist_ingestion','soft_delete_record','restore_record',
+                                             'search_records','search_type_counts')
 
   union all
   -- The allowlist is the security boundary. If these functions ever start

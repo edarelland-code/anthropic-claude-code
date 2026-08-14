@@ -165,6 +165,47 @@ begin
     'a soft-deleted record is still returned by search');
 
   -- =====================================================================
+  -- RANKING — deterministic, and current outranks history
+  -- =====================================================================
+
+  declare
+    first_state text; first_id uuid; run_a uuid[]; run_b uuid[];
+  begin
+    -- 'Blue icon' exists twice now: the superseded original and its
+    -- replacement's reason. At equal relevance the live one must come first.
+    select record_state, entity_id into first_state, first_id
+    from search_records(a_ws, 'geometry') limit 1;
+    perform t.assert(first_state = 'current',
+      format('a %s record outranked a current one', first_state));
+
+    -- The same query twice must produce the same order, or pagination can
+    -- silently drop and repeat rows between pages.
+    select array_agg(entity_id order by ord) into run_a
+    from (select entity_id, row_number() over () as ord from search_records(a_ws, 'icon')) x;
+    select array_agg(entity_id order by ord) into run_b
+    from (select entity_id, row_number() over () as ord from search_records(a_ws, 'icon')) y;
+    perform t.assert(run_a = run_b, 'search ranking is not deterministic between runs');
+
+    -- Paging is a window on that one order, not a fresh sort.
+    perform t.assert(
+      (select entity_id from search_records(a_ws, 'icon', p_limit => 1, p_offset => 1))
+      = run_a[2],
+      'page 2 does not continue page 1');
+
+    -- Filters narrow the same predicate the counts are computed from.
+    select count(*) into n from search_records(a_ws, 'icon', p_entity_types => array['decision']);
+    perform t.assert(
+      n = (select coalesce(sum(sc.n), 0) from search_type_counts(a_ws, 'icon') sc
+            where sc.entity_type = 'decision'),
+      'the filter chip count disagrees with the filtered results');
+
+    -- An empty query matches nothing rather than everything: returning the
+    -- whole workspace for a stray keystroke is not a search result.
+    select count(*) into n from search_records(a_ws, '');
+    perform t.assert(n = 0, 'an empty query returned rows');
+  end;
+
+  -- =====================================================================
   -- ISOLATION  ← this is the block that fails without security_invoker
   -- =====================================================================
 
@@ -194,6 +235,17 @@ begin
   perform t.assert(
     not exists (select 1 from search_documents where entity_id = a_session),
     'SEARCH LEAK: user B fetched user A''s transcript by id');
+
+  -- And the ranked entry point, which is what the application actually calls.
+  -- Naming A's workspace outright must return nothing rather than everything.
+  select count(*) into n from search_records(a_ws, 'icon');
+  perform t.assert(n = 0,
+    format('SEARCH LEAK: search_records returned %s of A''s records to B', n));
+  select count(*) into n from search_records(b_ws, 'zucchini or trapezoid or marmalade');
+  perform t.assert(n = 0, 'SEARCH LEAK: A''s content surfaced inside B''s own workspace search');
+  perform t.assert(
+    (select coalesce(sum(sc.n), 0) from search_type_counts(a_ws, 'icon') sc) = 0,
+    'SEARCH LEAK: the filter counts revealed how many records another workspace holds');
 
   perform t.logout();
   raise notice 'Search: transcripts, Current State fields, goals and every prompt version are retrievable; current, historical and snapshot hits are distinguished; soft deletes drop out; and user B sees none of user A''s records.';

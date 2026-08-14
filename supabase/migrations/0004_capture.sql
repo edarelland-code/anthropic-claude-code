@@ -70,11 +70,17 @@ $$;
 -- proposal cheap and leaves the decision where it belongs.
 -- ---------------------------------------------------------------------------
 
+-- Whitespace is collapsed BEFORE trimming, not after. btrim() with no second
+-- argument removes spaces only, so trimming first would leave a leading tab as
+-- a leading space once the collapse ran — and the identical expression in
+-- TypeScript (src/lib/ingestion/fingerprint.ts, which computes the hash of
+-- text that has not been inserted yet) would then disagree with this one on
+-- exactly the inputs a real paste produces.
 create or replace function content_fingerprint(t text)
 returns text language sql immutable parallel safe as $$
   select case
-    when t is null or btrim(t) = '' then null
-    else encode(sha256(convert_to(lower(regexp_replace(btrim(t), '\s+', ' ', 'g')), 'UTF8')), 'hex')
+    when t is null or btrim(regexp_replace(t, '\s+', ' ', 'g')) = '' then null
+    else encode(sha256(convert_to(lower(btrim(regexp_replace(t, '\s+', ' ', 'g'))), 'UTF8')), 'hex')
   end;
 $$;
 
@@ -381,6 +387,123 @@ comment on view search_documents is
 
 grant select on search_documents to authenticated, service_role;
 revoke all on search_documents from anon;
+
+-- ---------------------------------------------------------------------------
+-- 4b. Ranked search
+--
+-- Ranking lives here rather than in the client because ts_rank_cd cannot be
+-- expressed through PostgREST, and because it must be the same everywhere: one
+-- definition of "best match" for the search page, the Topic page and any future
+-- caller.
+--
+-- Entirely deterministic. The same query over the same rows always returns the
+-- same order, which is what makes search learnable — there is no model, no
+-- personalisation and no feedback loop anywhere in this path.
+--
+-- Two components, both fixed:
+--   * ts_rank_cd over the weighted vector — cover density, so a document that
+--     mentions every search term near each other beats one that scatters them.
+--   * A state multiplier. At equal textual relevance a record that is still
+--     true outranks one that was superseded, and a saved snapshot ranks below
+--     both because it is a rendering of records rather than a record. These are
+--     constants, chosen once and written down, not weights that drift.
+--
+-- Ties break on recency and then on id, so the order is total: two runs of the
+-- same query can never disagree, and pagination cannot drop or repeat a row.
+--
+-- SECURITY INVOKER (the default, stated explicitly because it is load-bearing):
+-- the function reads a security_invoker view, so RLS still applies as the
+-- caller. Making it definer would hand every workspace's records to anyone.
+-- ---------------------------------------------------------------------------
+
+create or replace function search_records(
+  p_workspace_id  uuid,
+  p_query         text,
+  p_entity_types  text[]      default null,
+  p_kinds         text[]      default null,
+  p_source_types  text[]      default null,
+  p_topic_id      uuid        default null,
+  p_record_states text[]      default null,
+  p_since         timestamptz default null,
+  p_until         timestamptz default null,
+  p_limit         integer     default 50,
+  p_offset        integer     default 0
+) returns table (
+  entity_type   entity_type,
+  entity_id     uuid,
+  workspace_id  uuid,
+  topic_id      uuid,
+  subtopic_id   uuid,
+  title         text,
+  snippet       text,
+  source_type   source_type,
+  kind          text,
+  status        text,
+  record_state  text,
+  occurred_at   timestamptz,
+  rank          real
+) language sql stable security invoker as $$
+  with q as (select websearch_to_tsquery('english', coalesce(p_query, '')) as tsq)
+  select
+    d.entity_type, d.entity_id, d.workspace_id, d.topic_id, d.subtopic_id,
+    d.title, d.snippet, d.source_type, d.kind, d.status, d.record_state,
+    d.occurred_at,
+    (ts_rank_cd(d.search_vector, q.tsq) *
+      case d.record_state
+        when 'current' then 1.0
+        when 'historical' then 0.6
+        else 0.4
+      end)::real as rank
+  from search_documents d, q
+  where d.workspace_id = p_workspace_id
+    -- An empty or stopword-only query matches nothing rather than everything.
+    -- Compared as text because @@ against an empty tsquery is merely a no-op
+    -- with a NOTICE, and a stray keystroke should not log noise on every read.
+    and q.tsq::text <> ''
+    and d.search_vector @@ q.tsq
+    and (p_entity_types  is null or d.entity_type::text = any(p_entity_types))
+    and (p_kinds         is null or d.kind = any(p_kinds))
+    and (p_source_types  is null or d.source_type::text = any(p_source_types))
+    and (p_topic_id      is null or d.topic_id = p_topic_id)
+    and (p_record_states is null or d.record_state = any(p_record_states))
+    and (p_since         is null or d.occurred_at >= p_since)
+    and (p_until         is null or d.occurred_at <= p_until)
+  order by rank desc, d.occurred_at desc, d.entity_id
+  limit greatest(coalesce(p_limit, 50), 0)
+  offset greatest(coalesce(p_offset, 0), 0);
+$$;
+
+comment on function search_records is
+  'Ranked universal search. Deterministic: ts_rank_cd with fixed state multipliers, ties broken on recency then id. security invoker — RLS on the underlying tables is authoritative.';
+
+-- The counts beside each filter chip. Same predicate, no ranking, no paging,
+-- so a chip can never disagree with the results it filters to.
+create or replace function search_type_counts(
+  p_workspace_id  uuid,
+  p_query         text,
+  p_source_types  text[]      default null,
+  p_topic_id      uuid        default null,
+  p_record_states text[]      default null,
+  p_since         timestamptz default null,
+  p_until         timestamptz default null
+) returns table (entity_type text, n bigint)
+language sql stable security invoker as $$
+  with q as (select websearch_to_tsquery('english', coalesce(p_query, '')) as tsq)
+  select d.entity_type::text, count(*)
+  from search_documents d, q
+  where d.workspace_id = p_workspace_id
+    -- An empty or stopword-only query matches nothing rather than everything.
+    -- Compared as text because @@ against an empty tsquery is merely a no-op
+    -- with a NOTICE, and a stray keystroke should not log noise on every read.
+    and q.tsq::text <> ''
+    and d.search_vector @@ q.tsq
+    and (p_source_types  is null or d.source_type::text = any(p_source_types))
+    and (p_topic_id      is null or d.topic_id = p_topic_id)
+    and (p_record_states is null or d.record_state = any(p_record_states))
+    and (p_since         is null or d.occurred_at >= p_since)
+    and (p_until         is null or d.occurred_at <= p_until)
+  group by 1;
+$$;
 
 -- ---------------------------------------------------------------------------
 -- 5. persist_ingestion — the one write path for an import
@@ -715,6 +838,10 @@ comment on function restore_record is
   'Clears deleted_at from a deletion_log tombstone and stamps restored_at. Same allowlist as soft_delete_record; refuses a second restore.';
 
 grant execute on function content_fingerprint(text) to authenticated, service_role;
+grant execute on function search_records(uuid, text, text[], text[], text[], uuid, text[], timestamptz, timestamptz, integer, integer) to authenticated, service_role;
+grant execute on function search_type_counts(uuid, text, text[], uuid, text[], timestamptz, timestamptz) to authenticated, service_role;
+revoke all on function search_records(uuid, text, text[], text[], text[], uuid, text[], timestamptz, timestamptz, integer, integer) from anon;
+revoke all on function search_type_counts(uuid, text, text[], uuid, text[], timestamptz, timestamptz) from anon;
 grant execute on function persist_ingestion(uuid, text, source_type, text, text, jsonb, text, timestamptz, text, uuid, uuid, jsonb, jsonb) to authenticated, service_role;
 grant execute on function soft_delete_record(entity_type, uuid, text) to authenticated, service_role;
 grant execute on function restore_record(uuid) to authenticated, service_role;
