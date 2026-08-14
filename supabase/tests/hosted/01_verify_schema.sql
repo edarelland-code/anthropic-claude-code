@@ -14,13 +14,13 @@ with expected_tables(name) as (
          ('file_references'),('actions'),('milestones'),('relationships'),('tags'),
          ('taggables'),('context_snapshots'),('ingestion_records'),('ingestion_tokens'),
          ('deletion_log'),('prompt_version_outcomes'),('prompt_winning_selections'),
-         ('ingestion_deliveries')
+         ('ingestion_deliveries'),('extraction_runs'),('extraction_suggestions')
 ),
 checks as (
 
   select 1 as ord, 'tables present' as check_name,
-         count(*)::text || ' / 27' as result,
-         case when count(*) = 27 then 'PASS' else 'FAIL: missing ' ||
+         count(*)::text || ' / 29' as result,
+         case when count(*) = 29 then 'PASS' else 'FAIL: missing ' ||
            coalesce((select string_agg(e.name, ', ') from expected_tables e
                      where not exists (select 1 from pg_tables p
                                        where p.schemaname='public' and p.tablename=e.name)), '?')
@@ -86,8 +86,8 @@ checks as (
 
   union all
   select 8, 'updated_at triggers',
-         count(*)::text || ' / 13',
-         case when count(*) = 13 then 'PASS' else 'FAIL' end
+         count(*)::text || ' / 15',
+         case when count(*) = 15 then 'PASS' else 'FAIL' end
   from pg_trigger where tgname like '%\_set\_updated\_at' escape '\'
 
   union all
@@ -331,5 +331,29 @@ checks as (
          case when count(*) >= 1 then 'PASS' else 'FAIL' end
   from pg_policies
   where schemaname = 'public' and tablename = 'ingestion_deliveries'
+
+  union all
+  -- Phase 6. A suggestion is not a record, and the table that holds one must
+  -- still be workspace-scoped: an unreviewed proposal quotes the source it came
+  -- from, so leaking one leaks the transcript.
+  select 33, 'suggestion tables are workspace-scoped and RLS-enabled',
+         count(*) filter (where c.relrowsecurity)::text || ' / 2 with RLS, '
+           || (select count(*) from pg_policies
+                where schemaname = 'public'
+                  and tablename in ('extraction_runs', 'extraction_suggestions'))::text || ' policies',
+         case when count(*) filter (where c.relrowsecurity) = 2
+               and (select count(*) from pg_policies
+                     where schemaname = 'public'
+                       and tablename in ('extraction_runs', 'extraction_suggestions')) >= 2
+              then 'PASS' else 'FAIL' end
+  from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relname in ('extraction_runs', 'extraction_suggestions')
+
+  union all
+  select 34, 'confirmation is security invoker',
+         coalesce(string_agg(p.proname || ':' || case when p.prosecdef then 'definer' else 'invoker' end, ', '), '(missing)'),
+         case when count(*) = 1 and bool_and(not p.prosecdef) then 'PASS' else 'FAIL' end
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname = 'public' and p.proname = 'confirm_extraction_suggestions'
 )
 select check_name, result, verdict from checks order by ord;
