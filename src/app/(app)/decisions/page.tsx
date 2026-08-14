@@ -74,7 +74,7 @@ export default async function DecisionsPage() {
                 <div className="pl-2">
                   <div className="flex flex-wrap items-baseline gap-2">
                     <h3 className="text-sm font-medium break-words">{decision.title}</h3>
-                    <Link href={`/topics/${topic.id}`} className="text-xs muted hover:underline">
+                    <Link href={`/topics/${topic.id}`} className="inline-flex min-h-11 items-center text-xs muted hover:underline">
                       {topic.name}
                     </Link>
                     <time className="ml-auto text-xs tabular-nums muted" dateTime={decision.decidedAt}>
@@ -119,7 +119,7 @@ export default async function DecisionsPage() {
                     <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium muted ring-1 ring-inset hairline">
                       {decision.status[0]!.toUpperCase() + decision.status.slice(1)}
                     </span>
-                    <Link href={`/topics/${topic.id}`} className="text-xs muted hover:underline">
+                    <Link href={`/topics/${topic.id}`} className="inline-flex min-h-11 items-center text-xs muted hover:underline">
                       {topic.name}
                     </Link>
                     <time className="ml-auto text-xs tabular-nums muted" dateTime={decision.decidedAt}>

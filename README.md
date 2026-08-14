@@ -17,6 +17,11 @@ Workspace → Topic → Subtopic → Knowledge → Source
 
 ## Status
 
+**Phase 2 (Memory) — complete.** Decisions with supersession and reasons, an Idea lifecycle that
+keeps rejected ideas and why, a Prompt library where the *winning version* is identified exactly,
+one unified Timeline across every source, Current State separate from history, and Master Topic
+Memory assembled on read. All creatable through the interface.
+
 **Phase 1 (Foundation) — complete.** All thirteen exit criteria pass, including the cross-device
 acceptance test on two physical machines. Live at **<https://contextshelf.vercel.app>**, backed by
 a hosted Supabase project with the schema applied and row-level security verified against it.
@@ -33,7 +38,7 @@ Full status, evidence per criterion, and the next task:
 |---|---|---|
 | 0 | Architecture, schema, rules | Done |
 | 1 | Auth · Topics · Subtopics · Knowledge entries · Home · Topic page · responsive shell | **Complete — deployed and cross-device validated** |
-| 2 | Timeline · Decisions · Ideas · Prompts + versions · Current State · Master Memory · Relationships | Not started |
+| 2 | Timeline · Decisions · Ideas · Prompts + versions · Current State · Master Memory · Relationships | **Complete** |
 | 3 | Inbox · Quick Capture · Search · Files · JSON + transcript import | Not started |
 | 4 | Resume in Claude (Compact / Standard / Full Audit × Chat / Cowork / Code) | Not started |
 | 5 | Claude Code ingestion — `/api/ingest`, git metadata, hooks, MCP pathway | Not started |

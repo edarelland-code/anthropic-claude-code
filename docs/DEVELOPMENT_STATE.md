@@ -5,10 +5,10 @@
 > `docs/ARCHITECTURE.md`; setup and deployment live in `docs/DEPLOYMENT.md`.
 
 **Last updated:** 2026-08-14
-**Current phase:** Phase 2 — Memory. **Implemented, hosted-validated, pending production deploy.**
+**Current phase:** Phase 2 — Memory. **Complete.** Implemented, hosted-validated, and creatable
+end-to-end through the interface. Merged to `main`.
 
-Phase 1 is closed and merged (see "Phase 1 — closed" below). Phase 2 work is on
-`phase-2-memory`.
+Phase 1 is closed and merged (see "Phase 1 — closed" below).
 
 Live at **<https://contextshelf.vercel.app>**, backed by Supabase `omhktzxwffaipmcoljic`, now
 carrying migration `0002` — 26 tables, 3 views, 35 policies.
@@ -71,14 +71,29 @@ selections, and drops nothing.
 | 23 | **Medium — a check that lied** | `schema-parity.mjs` applied only `0001`, hardcoded, so it compared hosted against a stale reference and reported all 61 new objects as differences | Applies every migration in order |
 | 24 | Medium | Touch targets of 16px on Timeline links at 390/375 | `min-h-11` on both link types |
 | 25 | Low | A Home note promised Phase 2 features that now exist | Rewritten to name only what is still absent |
+| 26 | **Medium — invisible failure** | Several forms on the Topic page carry an input named `title`, so an unscoped fill in the validator populated a different form and left the real one's required field empty. The browser blocked submission silently: no error, no row, and a page-content assertion would have seen the title text and passed | Every fill scoped to its own form. Caught only by the database assertion — the same class of failure AD-16 exists for |
+| 27 | Low | Topic links on the three section pages were 16px. They passed earlier only because those pages had no data to render | `min-h-11` on all five |
+
+### Creation forms
+
+Phase 2 is not finished until each object can be created through the interface — repository
+support plus a read-only screen is not "Decisions work". One controlled disclosure group on the
+Topic workspace holds all three forms: opening a second closes the first, and the open panel takes
+full width, so the page gains a row rather than three permanently-open forms. The global sections
+reuse the same forms behind a topic picker rather than keeping their own copies, because every
+memory object belongs to a topic (rule 1) and three copies would mean three places to change a
+field.
+
+The prompt form's outcome is the part worth care: it appends to `prompt_version_outcomes` and is
+never written onto the version, so `prompt_versions` stays insert-only.
 
 ### Not done in Phase 2
 
-- **`rateVersion` UI.** The repository method exists and is tested; no screen calls it yet.
-- **Relationship editing UI.** `RelationshipRepository` reads and writes; the Topic page does not
-  yet expose linking.
-- **Decision/Idea/Prompt creation forms.** The repositories are implemented and tested against the
-  hosted database; the Topic page still only creates knowledge entries and subtopics.
+- **`rateVersion` UI beyond creation.** An outcome can be set when a prompt is saved; re-rating an
+  existing version has no screen yet, though the repository method and its tests exist.
+- **Relationship editing UI.** `RelationshipRepository` reads and writes; nothing exposes linking.
+- **Supersede and lifecycle controls.** Superseding a decision and moving an idea through its
+  lifecycle work at the repository and database level, with tests, but have no buttons.
 
 These are named rather than mocked (rule 14).
 
@@ -288,18 +303,18 @@ Phase 1's criteria all pass. These are honest gaps in *coverage*, not open crite
 
 ## Next task
 
-**Phase 2 — Memory.** Start on a `phase-2-memory` branch. Phase 1 is closed and merged to `main`;
-`main` builds, typechecks, lints, and passes both test suites.
+**Phase 3 — Capture & retrieval.** Inbox, Quick Capture, full-text search, file/URL references,
+and transcript import. Exit criteria in `docs/ARCHITECTURE.md` §13.
 
-Exit criteria for Phase 2 are in `docs/ARCHITECTURE.md` §13. Do not modify a Phase 1 guarantee
-without recording the supersession here, per the process at the bottom of `CLAUDE.md`.
-
----
+The Phase 2 gaps listed under "Not done in Phase 2" are the natural first candidates if any of
+them blocks daily use before Phase 3 work begins.
 
 ## Resume trigger
 
 **IF** returning to ContextShelf development
-**THEN** Phase 1 is complete, validated, and merged. The hosted project and the deployment both
-exist and are proven, including cross-device continuity on two physical machines. Begin Phase 2 on
-a `phase-2-memory` branch, and read "Carried into Phase 2" above before planning — the email
-template limitation and the unwired realtime layer are both live constraints.
+**THEN** Phases 1 and 2 are complete, validated, and merged. The hosted project and the deployment both
+exist and are proven, including cross-device continuity on two physical machines. Decisions, ideas, and prompts can be created,
+read, superseded, and evaluated through the interface, and the Timeline folds every source into
+one history. Begin Phase 3 on a `phase-3-capture` branch, and read "Not done in Phase 2" and
+"Carried into Phase 2" first — the email template limitation, the unwired realtime layer, and the
+missing supersede/lifecycle controls are all live constraints.

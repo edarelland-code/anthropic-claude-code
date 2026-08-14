@@ -85,7 +85,7 @@ export default async function PromptsPage() {
                         <span className="inline-flex items-center rounded bg-cyan-50 px-1.5 py-0.5 text-[11px] font-medium text-cyan-700 ring-1 ring-inset ring-cyan-600/20 dark:bg-cyan-500/10 dark:text-cyan-300 dark:ring-cyan-400/20">
                           Winning v{winning!.version}
                         </span>
-                        <Link href={`/topics/${topic.id}`} className="text-xs muted hover:underline">
+                        <Link href={`/topics/${topic.id}`} className="inline-flex min-h-11 items-center text-xs muted hover:underline">
                           {topic.name}
                         </Link>
                         <time className="ml-auto text-xs tabular-nums muted" dateTime={winning!.selectedAt}>
@@ -129,7 +129,7 @@ export default async function PromptsPage() {
                             v{current.version} · {current.result.replace(/_/g, ' ')}
                           </span>
                         )}
-                        <Link href={`/topics/${topic.id}`} className="text-xs muted hover:underline">
+                        <Link href={`/topics/${topic.id}`} className="inline-flex min-h-11 items-center text-xs muted hover:underline">
                           {topic.name}
                         </Link>
                       </div>

@@ -89,7 +89,7 @@ export default async function IdeasPage() {
                     <div className="pl-2">
                       <div className="flex flex-wrap items-baseline gap-2">
                         <h3 className="text-sm font-medium break-words">{idea.title}</h3>
-                        <Link href={`/topics/${topic.id}`} className="text-xs muted hover:underline">
+                        <Link href={`/topics/${topic.id}`} className="inline-flex min-h-11 items-center text-xs muted hover:underline">
                           {topic.name}
                         </Link>
                         <time className="ml-auto text-xs tabular-nums muted" dateTime={idea.createdAt}>
