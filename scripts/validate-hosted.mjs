@@ -141,8 +141,13 @@ try {
 
   // --- I. Knowledge entries -------------------------------------------------
   heading('I. Knowledge entries');
-  // The entry form is the one carrying the hidden topicId.
-  const entryForm = 'form:has(input[name="topicId"])';
+  // Three forms on this page carry a hidden topicId and two have an input
+  // named "title", so selecting on either submits whichever comes first — the
+  // Open Issues form, which creates an action and not a knowledge entry. The
+  // text then appears on the page and a content check passes while the
+  // knowledge_entries table stays empty. Select on the type dropdown, which
+  // only the entry form has.
+  const entryForm = 'form:has(select[name="knowledgeType"])';
   const wanted = [
     ['Use approach A', 'decision', 'claude_code'],
     ['Ship the icon set', 'progress', 'claude_chat'],
@@ -166,6 +171,29 @@ try {
     } catch { /* counted below */ }
   }
   record('knowledge entries created', entries === wanted.length, `${entries} of ${wanted.length}`);
+
+  // --- Real-data persistence, asserted in the database ----------------------
+  // Page content proves the app rendered something. This proves the rows are
+  // actually in hosted Postgres, which is the claim that matters.
+  heading('Real-data persistence in hosted Postgres');
+  const { data: dbTopics } = await admin.from('topics').select('id,name,workspace_id').eq('name', TOPIC);
+  const dbTopic = (dbTopics ?? [])[0] ?? null;
+  record('topic row exists in the hosted database', Boolean(dbTopic), dbTopic ? `id ${dbTopic.id}` : 'not found');
+  if (dbTopic) {
+    const { count: subCount } = await admin
+      .from('subtopics').select('*', { count: 'exact', head: true }).eq('topic_id', dbTopic.id);
+    const { count: entryCount } = await admin
+      .from('knowledge_entries').select('*', { count: 'exact', head: true }).eq('topic_id', dbTopic.id);
+    record('subtopic rows persisted', (subCount ?? 0) >= 1, `${subCount ?? 0} row(s)`);
+    record('knowledge entry rows persisted', (entryCount ?? 0) >= 2, `${entryCount ?? 0} row(s)`);
+    const { data: provenance } = await admin
+      .from('knowledge_entries').select('title,knowledge_type,source_type').eq('topic_id', dbTopic.id);
+    const sources = [...new Set((provenance ?? []).map((r) => r.source_type))].sort();
+    const types = [...new Set((provenance ?? []).map((r) => r.knowledge_type))].sort();
+    // Provenance must survive the round trip, and must not be invented.
+    record('provenance recorded, not invented', sources.length > 0 && !sources.includes(null),
+      `sources ${sources.join('/')} · types ${types.join('/')}`);
+  }
 
   // --- C. Persists across a hard reload -------------------------------------
   heading('C. Persistence across a hard reload');
