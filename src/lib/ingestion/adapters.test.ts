@@ -133,7 +133,7 @@ describe('claudeSessionJsonAdapter', () => {
   it('refuses a payload with nothing to import', () => {
     const result = validateClaudeSessionImport({ version: 1, source: 'claude_chat' });
     expect(result.ok).toBe(false);
-    expect(result.errors.join(' ')).toContain('at least one message or one segment');
+    expect(result.errors.join(' ')).toContain('at least one message, segment or work item');
   });
 
   it('rejects an unknown knowledge type instead of coercing it', () => {

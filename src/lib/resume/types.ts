@@ -95,8 +95,14 @@ export interface MeaningfulChange {
   title: string;
   detail: string | null;
   occurredAt: string;
-  /** 'current' or 'historical' — never flattened together in output (4T). */
-  state: 'current' | 'historical';
+  /**
+   * Never flattened together in output (4T).
+   *
+   * `proposed` is a third state, not a shade of `historical`. A decision an
+   * automated delivery suggested has not been reached and has not been
+   * changed — labelling it history would tell a session it was already tried.
+   */
+  state: 'current' | 'historical' | 'proposed';
 }
 
 /** A prompt whose exact winning version is being carried across (4G). */
@@ -181,6 +187,17 @@ export interface ResumeContext {
   activeDecisions: Decision[];
   /** Superseded and rejected, kept separate from active (4T). */
   historicalDecisions: Decision[];
+  /**
+   * Proposed, and therefore not yet true.
+   *
+   * A Claude Code delivery can put a decision in front of a person but cannot
+   * make one, so `proposed` rows exist that are neither current nor history.
+   * They get their own section rather than being folded into either: filed
+   * under Active they would be acted on, and filed under History they would
+   * read as something already rejected. Both would be wrong in a way that
+   * costs the next session real work.
+   */
+  pendingDecisions: Decision[];
   requirements: KnowledgeEntry[];
   constraints: KnowledgeEntry[];
   completedWork: KnowledgeEntry[];

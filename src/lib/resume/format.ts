@@ -117,6 +117,27 @@ function renderDecisions(ctx: ResumeContext): Block[] {
     });
   }
 
+  // Between the two, and never folded into either. A proposal read as active
+  // gets acted on; read as history it looks already rejected.
+  if (has(ctx, 'pendingDecisions') && ctx.pendingDecisions.length > 0) {
+    const rows = ctx.pendingDecisions.map((d) => {
+      const why = clean(d.reason);
+      const from = d.sourceType === 'claude_code' ? ' (proposed by a Claude Code session)' : '';
+      return `- **${d.title}**${from} — ${clean(d.decision)}${why ? `\n  - Reasoning offered: ${why}` : ''}`;
+    });
+    out.push({
+      section: 'Proposed Decisions',
+      markdown: heading(
+        'Proposed Decisions — AWAITING REVIEW, NOT IN FORCE',
+        [
+          'These have been suggested and nobody has approved them. Do NOT treat them as decided and do NOT build on them. If one is relevant to what you are about to do, say so and ask.',
+          '',
+          ...rows,
+        ].join('\n'),
+      ),
+    });
+  }
+
   if (has(ctx, 'historicalDecisions') && ctx.historicalDecisions.length > 0) {
     const rows = ctx.historicalDecisions.map((d) => {
       const label = d.status === 'superseded' ? 'SUPERSEDED' : d.status.toUpperCase();
@@ -139,7 +160,12 @@ function renderChanges(ctx: ResumeContext): string {
   if (!has(ctx, 'recentChanges') || ctx.recentChanges.length === 0) return '';
   const line = (c: MeaningfulChange) => {
     const kind = KNOWLEDGE_TYPE_META[c.kind as keyof typeof KNOWLEDGE_TYPE_META]?.label ?? c.kind.replace(/_/g, ' ');
-    const state = c.state === 'historical' ? ' _(historical)_' : '';
+    const state =
+      c.state === 'historical'
+        ? ' _(historical)_'
+        : c.state === 'proposed'
+          ? ' _(proposed — not approved)_'
+          : '';
     return `- **${kind}:** ${c.title}${state}${clean(c.detail) ? ` — ${clean(c.detail)}` : ''}`;
   };
   return heading('Recent Meaningful Changes', ctx.recentChanges.map(line).join('\n'));

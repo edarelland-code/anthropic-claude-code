@@ -44,7 +44,8 @@ auth.users
       ├─ relationships          polymorphic graph edges
       ├─ tags ── taggables
       ├─ ingestion_records      the Inbox — every input lands here first
-      ├─ ingestion_tokens       bearer tokens for /api/ingest (Phase 5)
+      ├─ ingestion_tokens       bearer credentials for /api/ingest — hash only
+      ├─ ingestion_deliveries   the Idempotency-Key ledger for /api/ingest
       └─ deletion_log           tombstones for soft-deleted rows
 ```
 
@@ -313,6 +314,48 @@ unauthorised: the `UPDATE` matches nothing and the function raises.
 `on_auth_user_created` fires after an `auth.users` insert and creates the profile, a default
 workspace named *My Shelf*, and the owner membership row. A user who somehow predates the
 migration will have no workspace and needs a manual backfill.
+
+---
+
+## Token-authenticated ingestion
+
+`/api/ingest` is the only way into the database that does not begin with a signed-in browser
+session, so three schema facts hold it together.
+
+**The credential is a hash.** `ingestion_tokens.token_hash` is SHA-256 of a 256-bit secret, unique.
+`token_prefix` keeps the first eight characters so a person can tell two tokens apart in a list;
+that is all it is for. Nothing stores the token, so nothing can return it — Settings shows it once
+at creation and never again. Revoking stamps `revoked_at`; it never deletes the row, because the
+deliveries that row authorised still point at it.
+
+`scope_topic_id` / `scope_subtopic_id` are the token's default destination, and both use composite
+foreign keys `(scope_topic_id, workspace_id) → topics (id, workspace_id)` per AD-11 — a plain FK
+to `topics(id)` would let a token in one workspace default to a topic in another.
+
+**A retry is free.** `ingestion_deliveries` is the ledger: `unique (token_id, idempotency_key)`.
+The same token and key return the stored receipt and write nothing; the same key with a different
+`request_fingerprint` is refused. The unique index is the enforcement — not the endpoint
+remembering to look first, which would race with itself under concurrent retries.
+
+This is **not** duplicate detection. Duplicate detection compares content and proposes a merge to a
+person (rule 17). Idempotency compares a key the client chose and refuses to act twice on one
+delivery. See AD-22.
+
+**One write path.** `ingest_from_token()` resolves the token, checks the destination against the
+token's own workspace, sets the JWT claim so `auth.uid()` names the token's owner, and then calls
+`persist_ingestion()` — the same function the Inbox calls. It carries no copy of the ingestion
+logic. What it adds beyond that call is file references for the paths the session touched, the
+actions the payload NAMES as completed, the new actions it opened, and any decision it proposes,
+written `proposed`.
+
+It is `SECURITY INVOKER` with `EXECUTE` granted to `service_role` alone, so the workspace boundary
+is its own explicit checks rather than RLS — stated here because it is the one place in the schema
+where that is true, and asserted in `supabase/tests/08_ingest.test.sql` rather than assumed. See
+AD-21.
+
+`assert_ingest_work_allowed()` refuses any `work` key outside
+`completedActions` / `nextActions` / `proposedDecisions`, naming the key in the error. Ignoring an
+unknown key would let a client believe a decision had been superseded when nothing happened.
 
 ---
 

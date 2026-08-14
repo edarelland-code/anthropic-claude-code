@@ -440,6 +440,48 @@ export interface IngestionRecord {
   processedAt: string | null;
 }
 
+/**
+ * A credential a machine uses to deliver work, as a person sees it.
+ *
+ * There is no `token` field and there never will be. The secret is hashed on
+ * creation and the row keeps only the hash and a short prefix — enough to tell
+ * two tokens apart in a list, useless for authenticating. A token that has
+ * scrolled off someone's screen is not recoverable, which is the correct
+ * trade: recovering it would mean having stored it.
+ */
+export interface IngestionToken {
+  id: string;
+  workspaceId: string;
+  name: string;
+  /** The first characters of the secret, for recognition only. */
+  tokenPrefix: string | null;
+  /** Default destination when a delivery names none. */
+  scopeTopicId: string | null;
+  scopeSubtopicId: string | null;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+  expiresAt: string | null;
+  /** Set when this token replaced another, so a rotation is legible. */
+  rotatedFromId: string | null;
+  createdAt: string;
+}
+
+/** What a delivery wrote. Returned to the sender and stored for replay. */
+export interface IngestReceipt {
+  ingestionRecordId: string;
+  status: IngestionStatus;
+  topicId: string | null;
+  subtopicId: string | null;
+  sourceSessionId: string | null;
+  entryIds: string[];
+  fileReferenceIds: string[];
+  completedActionIds: string[];
+  nextActionIds: string[];
+  proposedDecisionIds: string[];
+  /** True when this response came from the delivery ledger, not from new work. */
+  replayed: boolean;
+}
+
 /** Counts shown on a Topic card. */
 export interface TopicCounts {
   subtopics: number;
@@ -472,6 +514,15 @@ export interface TopicContext {
   timeline: KnowledgeEntry[];
   activeDecisions: Decision[];
   supersededDecisions: Decision[];
+  /**
+   * Proposed by an automated delivery and not yet approved by anyone.
+   *
+   * Its own bucket because it is neither of the other two. Folded into
+   * `activeDecisions` it would be acted on; folded into `supersededDecisions`
+   * it would read as something already tried and dropped. Both mislead, and a
+   * decision is the record this product can least afford to misrepresent.
+   */
+  pendingDecisions: Decision[];
   rejectedIdeas: Idea[];
   openActions: Action[];
   /**

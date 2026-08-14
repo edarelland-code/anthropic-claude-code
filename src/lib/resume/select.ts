@@ -158,13 +158,17 @@ export function buildRecentMeaningfulChanges(input: {
 
   for (const d of input.decisions) {
     const superseded = d.supersededById !== null;
+    const proposed = d.status === 'proposed' && !superseded;
     out.push({
       id: d.id,
-      kind: superseded ? 'decision_superseded' : 'decision',
+      kind: proposed ? 'decision_proposed' : superseded ? 'decision_superseded' : 'decision',
       title: d.title,
       detail: superseded ? (d.supersedeReason ?? d.reason) : (d.reason ?? d.decision),
       occurredAt: d.decidedAt,
-      state: d.status === 'active' && !superseded ? 'current' : 'historical',
+      // Three states, not two. "Not current" was a safe stand-in for
+      // "historical" until a delivery could create a decision that has neither
+      // been reached nor changed.
+      state: proposed ? 'proposed' : d.status === 'active' && !superseded ? 'current' : 'historical',
     });
   }
 

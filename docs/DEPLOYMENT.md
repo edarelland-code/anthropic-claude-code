@@ -36,8 +36,13 @@ After step 4 you have the cross-device URL. Steps 5–6 make sign-in work reliab
 The publishable key is Supabase's current browser-facing key and replaces the legacy anon JWT. It
 is designed to ship to browsers: RLS is what protects the data, and
 `supabase/tests/02_rls.test.sql` proves it does. **The secret key (`sb_secret_…`) is different** —
-it bypasses RLS entirely. ContextShelf does not use it yet; when Phase 5 adds `/api/ingest` it
-will live in `SUPABASE_SECRET_KEY`, server-side only, never behind a `NEXT_PUBLIC_` prefix.
+it bypasses RLS entirely. It lives in `SUPABASE_SECRET_KEY`, server-side only, never behind a
+`NEXT_PUBLIC_` prefix, and **`/api/ingest` needs it**: a Claude Code delivery arrives with an
+ingestion token and no browser session, so there is no JWT for a policy to read and the request
+has to be authenticated before the database can be asked anything. Set it in the deployment's
+production environment or the endpoint answers 503 with the reason. It is used in exactly one
+place — `src/lib/adapters/supabase/service.ts` — by exactly one caller, and never reaches a
+Server Component.
 
 If your project predates the new key format and still shows only an anon JWT, generate the new
 pair from the same screen. ContextShelf reads only

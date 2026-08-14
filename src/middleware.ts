@@ -38,7 +38,16 @@ export async function middleware(request: NextRequest) {
   }
 
   const path = request.nextUrl.pathname;
-  const isPublic = path.startsWith('/login') || path.startsWith('/auth') || path.startsWith('/setup');
+  // `/api/*` is exempt because it carries its OWN authentication: an ingestion
+  // token in an Authorization header, not a session cookie. Redirecting it
+  // would answer every delivery with a 307 to an HTML login page, which a
+  // machine would report as a mysterious success. Exempt is not open — the
+  // route rejects a request without a valid token itself, with a 401.
+  const isPublic =
+    path.startsWith('/login') ||
+    path.startsWith('/auth') ||
+    path.startsWith('/setup') ||
+    path.startsWith('/api/');
 
   if (!user && !isPublic) {
     const redirect = request.nextUrl.clone();

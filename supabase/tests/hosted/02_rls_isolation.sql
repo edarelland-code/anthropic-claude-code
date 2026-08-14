@@ -19,6 +19,7 @@ declare
   a_id uuid; b_id uuid;
   a_ws uuid; b_ws uuid;
   a_topic uuid; a_sub uuid; a_entry uuid; a_decision uuid; a_prompt uuid; a_version uuid;
+  a_token uuid;
   b_topic uuid; b_entry uuid;
   n int; blocked boolean;
 
@@ -70,6 +71,10 @@ begin
 
   insert into prompt_versions (prompt_id, workspace_id, user_id, version, body)
   values (a_prompt, a_ws, a_id, 1, 'secret prompt body') returning id into a_version;
+
+  insert into ingestion_tokens (workspace_id, user_id, name, token_hash, token_prefix, scope_topic_id)
+  values (a_ws, a_id, 'A''s laptop', 'hosted-rls-' || gen_random_uuid()::text, 'cs_live_aaaa', a_topic)
+  returning id into a_token;
 
   insert into actions (workspace_id, topic_id, user_id, kind, title)
   values (a_ws, a_topic, a_id, 'next_step', 'Test the nudge');
@@ -265,6 +270,50 @@ begin
   exception when others then blocked := true; end;
   if not blocked then raise exception 'FAIL: B recorded a resume export against A''s topic'; end if;
 
+  -- --- Phase 5: ingestion credentials must not leak --------------------------
+  --
+  -- A token row is a credential's shadow. Even without the secret, reading
+  -- another workspace's tokens tells an attacker which machines are connected,
+  -- what they default to, and when each was last used — and being able to
+  -- WRITE one would be a way to mint a working credential inside somebody
+  -- else's workspace.
+  select count(*) into n from ingestion_tokens;
+  if n <> 0 then raise exception 'FAIL: B reads % of A''s ingestion tokens', n; end if;
+
+  select count(*) into n from ingestion_deliveries;
+  if n <> 0 then raise exception 'FAIL: B reads A''s delivery ledger'; end if;
+
+  blocked := false;
+  begin
+    insert into ingestion_tokens (workspace_id, user_id, name, token_hash)
+    values (a_ws, b_id, 'a token in A''s workspace', 'hosted-rls-probe-' || gen_random_uuid()::text);
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'FAIL: B minted a token inside A''s workspace'; end if;
+
+  blocked := false;
+  begin
+    -- A's token id, held from the fixture block. Reading it back here would
+    -- return nothing (B cannot see A's tokens), and an INSERT ... SELECT that
+    -- selected no rows would insert nothing and look exactly like a policy
+    -- refusal — a test that could never fail.
+    insert into ingestion_deliveries (workspace_id, token_id, idempotency_key, request_fingerprint)
+    values (a_ws, a_token, 'probe', 'probe');
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'FAIL: B wrote into A''s delivery ledger'; end if;
+
+  -- The endpoint's own function must be unreachable from a signed-in session.
+  -- If it were not, a leaked hash would be usable by any account at all.
+  if has_function_privilege('authenticated',
+       'ingest_from_token(text,text,text,uuid,uuid,text,source_type,text,text,jsonb,text,timestamptz,text,jsonb,jsonb,jsonb)',
+       'execute') then
+    raise exception 'FAIL: authenticated can execute ingest_from_token';
+  end if;
+  if has_function_privilege('anon',
+       'ingest_from_token(text,text,text,uuid,uuid,text,source_type,text,text,jsonb,text,timestamptz,text,jsonb,jsonb,jsonb)',
+       'execute') then
+    raise exception 'FAIL: anon can execute ingest_from_token';
+  end if;
+
   -- --- Phase 3: universal search must not leak -------------------------------
   --
   -- search_documents unions twelve tables, so it is the widest surface in the
@@ -326,7 +375,7 @@ begin
   execute 'reset role';
   perform set_config('request.jwt.claims', '', true);
 
-  raise notice 'ALL HOSTED RLS CHECKS PASSED, including the Phase 2 timeline and prompt views, the Phase 3 search projection and the Phase 4 resume history (%)', procedure_note;
+  raise notice 'ALL HOSTED RLS CHECKS PASSED, including the Phase 2 timeline and prompt views, the Phase 3 search projection, the Phase 4 resume history and the Phase 5 ingestion credentials (%)', procedure_note;
 end $$;
 
 select 'ALL HOSTED RLS CHECKS PASSED — nothing was persisted' as result;

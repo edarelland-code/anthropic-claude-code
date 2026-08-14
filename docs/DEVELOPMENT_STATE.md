@@ -5,15 +5,15 @@
 > `docs/ARCHITECTURE.md`; setup and deployment live in `docs/DEPLOYMENT.md`.
 
 **Last updated:** 2026-08-14
-**Current phase:** Phase 4 — Continuation. **Complete.** Implemented, hosted-validated, and usable
-end to end through the interface.
+**Current phase:** Phase 5 — Claude Code integration. **Complete.** Implemented, hosted-validated,
+and usable end to end through a real HTTP endpoint.
 
-Phases 1, 2 and 3 are closed and merged.
+Phases 1, 2, 3 and 4 are closed and merged.
 
 Live at **<https://contextshelf.vercel.app>**, backed by Supabase `omhktzxwffaipmcoljic`, carrying
-migrations `0001`–`0004` — **26 tables**, 4 views, 35 policies. Phase 4 added **no migration at
-all**: `context_snapshots`, `resume_trigger_if/then` on both topics and subtopics, and the
-`context_density` enum were all modelled in Phase 0.
+migrations `0001`–`0006` — **27 tables**, 4 views, 36 policies. Phase 5 added one table
+(`ingestion_deliveries`, the Idempotency-Key ledger), scope and expiry columns on the
+`ingestion_tokens` table Phase 0 had already created, and one function.
 
 ---
 
@@ -31,6 +31,130 @@ These terms mean exactly this and nothing more:
 | **Production validated** | Verified on the deployed URL against the hosted Supabase project |
 | **Cross-device validated** | The same account was verified on two physical machines |
 
+
+---
+
+## Phase 5 — Claude Code integration
+
+### What Phase 0 and Phase 3 had already built
+
+The fourth audit in a row to find most of the phase already modelled. `ingestion_tokens` existed
+with a unique `token_hash`, RLS and a `revoked_at` stamp. `source_sessions` already carried
+`repo_url`, `branch`, `commit_sha`, `files_changed/added/removed`, `build_status`, `test_summary`
+and `artifacts`. Phase 3 had built the whole funnel — adapters → `NormalizedIngestion` →
+`persist_ingestion()` → `ingestion_records` → `source_sessions` → entries — and had written the
+canonical Claude Session Import format specifically so that Phase 5 would be a transport rather
+than a second parser.
+
+What was genuinely missing was the part that makes a token usable without a browser session, and
+the part that makes a retry safe.
+
+### The architecture
+
+```
+Claude Code
+  → npm run contextshelf:sync            (or the optional SessionEnd hook)
+  → POST /api/ingest      Authorization: Bearer cs_live_… · Idempotency-Key
+  → claudeSessionJsonAdapter             the SAME adapter the JSON import screen uses
+  → ingest_from_token()                  resolves the token, checks scope, then calls
+  → persist_ingestion()                  the SAME function the Inbox calls
+  → ingestion_records → source_sessions → knowledge entries
+                                       → file references, actions, proposed decisions
+  → Timeline · Search · the next Resume
+```
+
+There is no second write path. A payload posted to the endpoint and the same payload pasted into
+the JSON import screen produce the same records.
+
+### Delivery is not authority
+
+The line Phase 5 draws, and the only reason automated capture is safe to switch on:
+
+| A delivery MAY record | A delivery may NOT |
+|---|---|
+| repository, branch, commit | replace Current State |
+| files changed / added / removed | supersede or reject a decision |
+| build result, test result | approve its own proposed decision |
+| implementation, bug, fix, progress | reject an idea |
+| an action it NAMES as completed | choose a winning prompt version |
+| a new next action or blocker | delete anything |
+| a decision, **as `proposed`** | resolve a conflict |
+
+The refusal is explicit at both ends. `validateClaudeSessionImport` rejects an unrecognised `work`
+key by name, and `assert_ingest_work_allowed()` refuses it again in the database. Silently
+ignoring one would be the worst outcome available: a client that sent `supersedeDecisions` would
+get a 200 and believe a decision had been replaced, with its absence as the only evidence.
+
+**An action closes only when the delivery names it.** Omission is not evidence — a payload that
+forgot to mention an action would otherwise silently close work the user still intends to do.
+
+### Where the workspace comes from
+
+From the token row and from nothing else. There is no parameter for a workspace, the payload
+schema warns when something tries to name one, and the topic named in `target` is looked up
+scoped to the token's workspace — so a topic belonging to somebody else is answered exactly as a
+topic that does not exist, with the same message and the same 404.
+
+**What enforces this is the function's own checks, not RLS**, and that is stated in the migration
+rather than left to be discovered. `service_role` bypasses row-level security by design, because
+a delivery carries no Supabase session for a policy to read. The original design dropped to
+`authenticated` inside the function so the ordinary policies would apply; PostgreSQL forbids
+`SET ROLE` inside a `SECURITY DEFINER` function, and `08_ingest.test.sql` caught it on the first
+run. A version that silently failed to switch would have looked identical while enforcing
+nothing — so the checks are asserted in that suite instead of assumed.
+
+### Idempotency is not duplicate detection
+
+Two different things that a shared word would have blurred:
+
+* **Idempotency** compares a key the *client* chose. The same token and key return the original
+  receipt and write nothing; the same key with different content is refused with a 409 rather than
+  answered with the wrong receipt. Enforced by a unique index, not by the endpoint remembering.
+* **Duplicate detection** (Phase 3, rule 17) compares *content* and proposes a merge to a person.
+  The same content under a new key is a new delivery, and whether it is a duplicate is the user's
+  judgement.
+
+`npm run contextshelf:sync` defaults its key to a hash of the payload, so running it twice by
+accident replays rather than duplicating. That is a client convenience; the server treats the key
+as opaque.
+
+### Issues found and fixed
+
+| # | Severity | Issue | Fix |
+|---|---|---|---|
+| 47 | **High — would have enforced nothing** | `ingest_from_token` was written `SECURITY DEFINER` and dropped to `authenticated` so RLS would apply. PostgreSQL forbids `SET ROLE` in a definer function | Restructured to `SECURITY INVOKER`, executable by `service_role` alone, with the workspace boundary as explicit checks that `08_ingest.test.sql` proves rather than assumes |
+| 48 | **High — told a session to avoid something nobody rejected** | `avoidList()` treated every non-active decision as evaluated-and-set-aside. Safe while every decision had been decided by a person; since Phase 5 a delivery can create one nobody has reviewed. A proposal on the avoid list makes the next session refuse a direction that was never turned down | `proposed` excluded from the avoid list, with a regression that a genuinely *rejected* decision still reaches it |
+| 49 | Medium | Recent Meaningful Changes labelled a proposed decision `(historical)` — "not current" had silently meant "was current once" | A third state: `proposed`, rendered "proposed — not approved" |
+| 50 | **Medium — an unauthenticated format oracle** | The route parsed and validated the payload before checking the token, so a caller with an invented token got a 422 listing exactly which fields were wrong | Authenticate first. One indexed lookup buys an endpoint that says nothing at all to a caller it does not know |
+| 51 | **Medium — a table anyone could reach** | Supabase's default privileges grant every NEW public table to `anon`; 0005 did not revoke them. `npm run test:db` passed because the local cluster has no such defaults | Migration 0006. RLS already stood in front of the table, so nothing leaked — but "anon has no table privileges" is exactly the check that only earns its keep on the real project |
+| 52 | Medium | A 24px icon-only Resolve button on the Topic page, from Phase 3. Invisible to every earlier audit because no QA topic had ever had an open action | Raised to 44px; the Phase 5 QA topic has three |
+| 53 | **Medium — a check that lied, again** | Three Resume assertions read the preview after clicking "Claude Code", waiting for text the *previous* document already contained. Same class as Phase 4 issue 46 | Wait for the preview to change, and assert the destination re-rendered before reading it |
+
+### The optional session-end hook
+
+Shipped, not deferred, because `SessionEnd` could be verified as a real hook event in the
+installed Claude Code (2.1.231) rather than assumed. It was chosen over `Stop` and `PostToolUse`
+because it fires once per session — a delivery per tool call would bury the shelf.
+
+Nothing installs it; registering it in `.claude/settings.json` is the opt-in, and
+`CONTEXTSHELF_SYNC_ON_SESSION_END=0` disables it without unregistering. It exits 0 unconditionally
+and runs under a 20-second timeout, so an outage cannot hold a session open. It reports only what
+git can be asked. It cannot know which action you finished, what you decided, or whether the build
+passed — those come from running the sync command with `--done`, `--next` and `--tests` yourself,
+and a hook that guessed at them would be inventing the most important records in the product.
+
+A hard kill does not fire `SessionEnd`. Manual sync is the path that can be relied on; this is a
+convenience on top of it.
+
+### Not done in Phase 5
+
+* **MCP pathway.** The brief lists it beside hooks. The canonical payload and the endpoint are
+  what an MCP server would call, so it is an adapter away rather than a rewrite — but it is not
+  built and is not implied anywhere in the UI.
+* **Rate limiting on `/api/ingest`.** A token is required, a body is capped at 1 MB, and the
+  ledger makes a retry free. Beyond that a compromised token could write until it is revoked.
+  Worth revisiting when there is more than one user.
+* **Relationship editing** — still deferred from Phase 4.
 
 ---
 
@@ -514,19 +638,19 @@ Phase 1's criteria all pass. These are honest gaps in *coverage*, not open crite
 
 ---
 
-## Test results (last run, 2026-08-14, end of Phase 4)
+## Test results (last run, 2026-08-14, end of Phase 5)
 
 | Suite | Result |
 |---|---|
-| `npm run build` | pass — 21 routes |
+| `npm run build` | pass — 22 routes, including `/api/ingest` |
 | `npm run typecheck` | pass |
 | `npm run lint` | pass, 0 warnings |
-| `npm run test` | **163 passed** / 12 files |
-| `npm run test:db` | **7 suites passed** against PostgreSQL 16.13, plus both hosted-script smoke tests |
-| `npm run schema:parity` | columns 325, enums 14, RLS 26, policies 35, indexes 102, constraints 151, triggers 19, functions 17 — all matching |
-| `hosted/01_verify_schema.sql` | **26/26 PASS** against `omhktzxwffaipmcoljic` |
-| `hosted/02_rls_isolation.sql` | **ALL HOSTED RLS CHECKS PASSED**, rolled back — now including resume history |
-| `npm run validate:hosted` | **68/68 checks pass** |
+| `npm run test` | **214 passed** / 15 files |
+| `npm run test:db` | **8 suites passed** against PostgreSQL 16.13, plus both hosted-script smoke tests |
+| `npm run schema:parity` | columns 338, enums 14, RLS 27, policies 36, indexes 106, constraints 159, triggers 19, functions 19 — all matching |
+| `hosted/01_verify_schema.sql` | **32/32 PASS** against `omhktzxwffaipmcoljic` |
+| `hosted/02_rls_isolation.sql` | **ALL HOSTED RLS CHECKS PASSED**, rolled back — now including ingestion credentials |
+| `npm run validate:hosted` | **107/107 checks pass** |
 | Authenticated responsive QA | **100 combinations, 0 skipped, no layout failures** |
 | Cross-device acceptance test | **PASS** — Work PC ↔ Mac, both directions, by the account holder |
 
@@ -539,26 +663,30 @@ deleted by its own cleanup — `context_snapshots`, `knowledge_entries`, `source
 
 ## Next task
 
-**Phase 5 — Claude Code integration.** `/api/ingest`, ingestion tokens, the git metadata model,
-hook scripts, and the MCP pathway. Exit criteria in `docs/ARCHITECTURE.md` §13: a real `git commit`
-in a real repository produces a real ContextShelf entry with no manual step.
+**Phase 6 — Automation.** Browser companion architecture, Chat/Cowork ingestion,
+auto-classification, and surfacing the duplicate and conflict detection that already exists.
+Exit criteria in `docs/ARCHITECTURE.md` §13: duplicate detection proposes (never applies) merges
+and the user confirms.
 
-Phase 4 left the receiving half of that already modelled — `code_context` on Resume renders
-repository, branch and recent Claude Code sessions from `source_sessions`, and reads empty rather
-than guessing when nothing has been captured. Phase 5 fills it.
+Phase 5 left the receiving half already built. A browser companion is a new **adapter** posting the
+same canonical payload to the same endpoint with its own token — not a new write path (rule 20).
+R2 in §14 still holds: there is no supported export or API for Claude Chat and Cowork, and nothing
+in the UI may imply otherwise until there is.
 
-The items under "Not done in Phase 4" are the natural first candidates if any of them blocks daily
-use before Phase 5 work begins — relationship editing is the only one that limits what Resume can
-reach today.
+The items under "Not done in Phase 5" are the natural first candidates: the MCP pathway, rate
+limiting on `/api/ingest`, and relationship editing, which is still deferred from Phase 4.
 
 ## Resume trigger
 
 **IF** returning to ContextShelf development
-**THEN** Phases 1–4 are complete, validated, and merged. The hosted project and the deployment
+**THEN** Phases 1–5 are complete, validated, and merged. The hosted project and the deployment
 both exist and are proven, including cross-device continuity on two physical machines. Capture,
 triage, search, files and recovery all work end to end, and a Topic or Subtopic now generates a
 continuation prompt that a fresh Claude session can start from — assembled deterministically from
-current records, with no model API and no second memory store. Begin Phase 5 on a
-`phase-5-claude-code` branch, and read "Not done in Phase 4" and the leakproof-limit note first —
+current records, with no model API and no second memory store. A Claude Code session can now
+deliver its own work over an authenticated endpoint, idempotently, and that work reaches the
+Timeline, search and the next Resume without a manual step — while every judgement it might have
+made arrives as a proposal for you. Begin Phase 6 on a `phase-6-automation` branch, and read
+"Not done in Phase 5" and the leakproof-limit note first — the MCP pathway, rate limiting,
 relationship editing, the unwired realtime layer, and the full-text scan-not-index behaviour under
 RLS are all live constraints.

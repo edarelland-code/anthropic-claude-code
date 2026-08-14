@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { getData } from '@/lib/data';
 import { DELETABLE_ENTITY_TYPES } from '@/lib/domain/types';
 import { toUserFacingError } from '@/lib/errors';
+import { mintToken } from '@/lib/ingestion/token';
 
 export interface FormState {
   error: string | null;
@@ -72,4 +73,92 @@ export async function restoreAction(_prev: FormState, formData: FormData): Promi
   revalidatePath('/timeline');
   revalidatePath('/topics');
   return { error: null, message: 'Restored.' };
+}
+
+// ---------------------------------------------------------------------------
+// Claude Code connection
+// ---------------------------------------------------------------------------
+
+/**
+ * The one shape in this product that carries a secret.
+ *
+ * `token` is present exactly once, in the response to the action that created
+ * it, and is never persisted anywhere it could be read again. The list on the
+ * page is built from rows that do not contain it.
+ */
+export interface TokenFormState extends FormState {
+  token?: string | null;
+  tokenName?: string | null;
+}
+
+const createTokenSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  scopeTopicId: z.string().uuid().nullable(),
+  scopeSubtopicId: z.string().uuid().nullable(),
+  rotatedFromId: z.string().uuid().nullable(),
+});
+
+export async function createTokenAction(
+  _prev: TokenFormState,
+  formData: FormData,
+): Promise<TokenFormState> {
+  const parsed = createTokenSchema.safeParse({
+    name: formData.get('name'),
+    scopeTopicId: formData.get('scopeTopicId') || null,
+    scopeSubtopicId: formData.get('scopeSubtopicId') || null,
+    rotatedFromId: formData.get('rotatedFromId') || null,
+  });
+  if (!parsed.success) return { error: 'Give the token a name so you can recognise it later.' };
+
+  const data = await getData();
+  try {
+    const workspace = await data.workspaces.getDefault();
+    if (!workspace) return { error: 'No workspace is available yet.' };
+
+    const minted = await mintToken();
+    await data.tokens.create({
+      workspaceId: workspace.id,
+      name: parsed.data.name,
+      tokenHash: minted.hash,
+      tokenPrefix: minted.prefix,
+      scopeTopicId: parsed.data.scopeTopicId,
+      scopeSubtopicId: parsed.data.scopeSubtopicId,
+      rotatedFromId: parsed.data.rotatedFromId,
+    });
+
+    // Rotation, when it is one: the replacement exists before the old token
+    // stops working, so a machine is never briefly unable to deliver.
+    if (parsed.data.rotatedFromId) await data.tokens.revoke(parsed.data.rotatedFromId);
+
+    revalidatePath('/settings');
+    return {
+      error: null,
+      token: minted.token,
+      tokenName: parsed.data.name,
+      message: parsed.data.rotatedFromId
+        ? 'The replacement is live and the old token has been revoked.'
+        : 'Created.',
+    };
+  } catch (cause) {
+    return { error: toUserFacingError(cause).message };
+  }
+}
+
+const revokeTokenSchema = z.object({ id: z.string().uuid() });
+
+export async function revokeTokenAction(
+  _prev: TokenFormState,
+  formData: FormData,
+): Promise<TokenFormState> {
+  const parsed = revokeTokenSchema.safeParse({ id: formData.get('id') });
+  if (!parsed.success) return { error: 'That token could not be identified.' };
+
+  const data = await getData();
+  try {
+    await data.tokens.revoke(parsed.data.id);
+  } catch (cause) {
+    return { error: toUserFacingError(cause).message };
+  }
+  revalidatePath('/settings');
+  return { error: null, message: 'Revoked. Any machine still using it will be refused.' };
 }

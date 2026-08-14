@@ -19,8 +19,10 @@ import type {
   FileReference,
   Idea,
   IdeaStatus,
+  IngestReceipt,
   IngestionRecord,
   IngestionStatus,
+  IngestionToken,
   KnowledgeEntry,
   KnowledgeType,
   Prompt,
@@ -592,6 +594,77 @@ export interface RelationshipRepository {
   unlink(relationshipId: string): Promise<void>;
 }
 
+/**
+ * Ingestion tokens, from the owner's side.
+ *
+ * `create` takes a hash and a prefix, never a secret. Generating and hashing
+ * happen in one place — `src/lib/ingestion/token.ts` — and the plaintext is
+ * returned to the caller for display exactly once; nothing in this interface
+ * can hand it back later, because nothing has it.
+ */
+export interface TokenRepository {
+  list(workspaceId: string): Promise<IngestionToken[]>;
+  getById(id: string): Promise<IngestionToken | null>;
+  create(input: {
+    workspaceId: string;
+    name: string;
+    tokenHash: string;
+    tokenPrefix: string;
+    scopeTopicId?: string | null;
+    scopeSubtopicId?: string | null;
+    expiresAt?: string | null;
+    rotatedFromId?: string | null;
+  }): Promise<IngestionToken>;
+  /**
+   * Revocation is a stamp, not a delete. A deleted token would take its
+   * deliveries' provenance with it, and "when did we turn that machine off"
+   * is exactly the question an audit asks.
+   */
+  revoke(id: string): Promise<IngestionToken>;
+}
+
+/** A delivery as it arrives from a machine, before anything is written. */
+export interface IngestDelivery {
+  tokenHash: string;
+  idempotencyKey: string | null;
+  requestFingerprint: string;
+  topicId: string | null;
+  subtopicId: string | null;
+  adapterId: string;
+  sourceType: SourceType;
+  contentType: string;
+  raw: string;
+  payload: Record<string, unknown> | null;
+  title: string | null;
+  occurredAt: string | null;
+  externalUrl: string | null;
+  segments: Array<Record<string, unknown>>;
+  code: Record<string, unknown> | null;
+  work: Record<string, unknown> | null;
+}
+
+/** What a token identifies, for a connection check that reveals nothing else. */
+export interface TokenIdentity {
+  tokenName: string;
+  workspaceName: string;
+  scopeTopicId: string | null;
+  scopeTopicName: string | null;
+  scopeSubtopicId: string | null;
+}
+
+/**
+ * The server side of `/api/ingest`.
+ *
+ * Deliberately separate from `DataContext`: everything there runs as a
+ * signed-in person, and this runs as the server on behalf of a token. Keeping
+ * them apart means no Server Component can accidentally reach a method that
+ * bypasses a session, and the one place that can is a route handler.
+ */
+export interface IngestGateway {
+  identify(tokenHash: string): Promise<TokenIdentity | null>;
+  deliver(input: IngestDelivery): Promise<IngestReceipt>;
+}
+
 /** The single object handed to Server Components. */
 export interface DataContext {
   auth: AuthPort;
@@ -612,4 +685,5 @@ export interface DataContext {
   proposals: ProposalRepository;
   recycle: RecycleRepository;
   resumeHistory: ResumeHistoryRepository;
+  tokens: TokenRepository;
 }

@@ -10,6 +10,8 @@
 
 import type { KnowledgeType, SourceType } from '@/lib/domain/types';
 
+import type { ClaudeSessionWork } from './schema';
+
 /**
  * A candidate Layer 2 entry, carved out of Layer 1.
  *
@@ -41,6 +43,7 @@ export interface ClaudeCodeMetadata {
   filesRemoved?: string[];
   buildStatus?: string;
   testSummary?: string;
+  artifacts?: string[];
 }
 
 /**
@@ -59,6 +62,21 @@ export interface NormalizedIngestion {
   raw: string;
   segments: NormalizedSegment[];
   code?: ClaudeCodeMetadata;
+  /**
+   * Actions the session finished, actions it opened, decisions it proposes.
+   *
+   * Only a source that can speak for the work it just did fills this in —
+   * today that is Claude Code. It is on the canonical payload rather than on a
+   * Claude-Code-only shape so the persister stays one funnel: a future source
+   * that can report the same facts needs an adapter, not a write path.
+   */
+  work?: ClaudeSessionWork;
+  /**
+   * Where the producer says it belongs. Still checked against the caller's
+   * workspace before anything is written — a stated destination is a request,
+   * not an authorisation.
+   */
+  target?: { topicId?: string; subtopicId?: string };
   /** Free-text hints from the source. Suggestions only — never applied. */
   hints?: { topic?: string; subtopic?: string; tags?: string[] };
   /** Structured payload kept alongside the raw text for audit. */
