@@ -122,6 +122,8 @@ async function deleteUser(email) {
 
 const browser = await chromium.launch(launchOptions());
 let exitCode = 0;
+/** Filled once the run has created a subtopic, for the responsive audit's URLs. */
+let qaSubtopicId = null;
 
 try {
   // --- B. Authentication ----------------------------------------------------
@@ -596,6 +598,113 @@ try {
       Boolean(badType), badType?.message?.slice(0, 60) ?? 'ACCEPTED');
   }
 
+  // --- Phase 4: Resume ------------------------------------------------------
+  //
+  // Driven through the deployed UI, then asserted in the database (AD-16). A
+  // preview that renders is evidence the app produced text; only the recorded
+  // row is evidence that the export happened and was scoped to this user.
+  heading('R. Resume in Claude');
+  await a.goto(`${BASE}/topics/${topicId}/resume`, { waitUntil: 'networkidle' });
+  await a.waitForFunction(() => /ContextShelf Resume Context/.test(document.body.innerText), null, {
+    timeout: 30_000,
+  }).catch(() => {});
+
+  const previewText = async () => (await a.locator('pre').first().innerText().catch(() => '')) || '';
+  const standardPreview = await previewText();
+
+  record('a resume generates for the topic',
+    standardPreview.includes('ContextShelf Resume Context'), `${standardPreview.length} characters`);
+  record('it carries the current direction and the reason it changed',
+    standardPreview.includes('Active Decisions') && standardPreview.includes('Avoid / Do Not Repeat'),
+    'current and avoid sections present');
+  record('current and historical are never one list',
+    standardPreview.includes('CURRENT'),
+    standardPreview.includes('CURRENT') ? 'labelled' : 'NOT labelled');
+  record('it instructs the session not to revive rejected directions',
+    standardPreview.includes('unless new evidence has appeared'), 'instruction present');
+
+  // Density changes the document, and Compact is genuinely smaller.
+  await a.click('button:has-text("Compact")').catch(() => {});
+  await a.waitForFunction(
+    (previous) => {
+      const pre = document.querySelector('pre');
+      return pre !== null && pre.textContent !== null && pre.textContent.length !== previous;
+    },
+    standardPreview.length,
+    { timeout: 30_000 },
+  ).catch(() => {});
+  const compactPreview = await previewText();
+  record('compact is materially smaller than standard',
+    compactPreview.length > 0 && compactPreview.length < standardPreview.length,
+    `${compactPreview.length} vs ${standardPreview.length} characters`);
+
+  // Claude Code carries repository detail; Chat does not.
+  await a.click('button:has-text("Standard")').catch(() => {});
+  await a.click('button:has-text("Claude Code")').catch(() => {});
+  await a.waitForFunction(() => /Immediate Coding Task|## Repository|Objective/.test(document.body.innerText), null, { timeout: 30_000 }).catch(() => {});
+  const codePreview = await previewText();
+  record('the Claude Code destination changes the document',
+    codePreview.length > 0 && codePreview !== standardPreview, 'code profile rendered');
+
+  // Copy, which is what records the export.
+  //
+  // The button flips to "Copied" the moment the click is handled — the export
+  // is recorded by a server action that resolves afterwards, so waiting on the
+  // button label would race the insert and report "no row" for a write that
+  // was merely still in flight. The confirmation line is the signal that the
+  // write returned, and the row is then polled rather than read once, because
+  // "the UI said so" is not evidence of persistence (AD-16).
+  await a.context().grantPermissions(['clipboard-read', 'clipboard-write']).catch(() => {});
+  await a.click('button:has-text("Copy resume context")').catch(() => {});
+  const copyAcknowledged = await a
+    .waitForFunction(() => /Copied/.test(document.body.innerText), null, { timeout: 30_000 })
+    .then(() => true)
+    .catch(() => false);
+  await a
+    .waitForFunction(() => /Recorded|could not be recorded/.test(document.body.innerText), null, {
+      timeout: 30_000,
+    })
+    .catch(() => {});
+
+  let snap = null;
+  for (let attempt = 0; attempt < 10 && !snap; attempt += 1) {
+    const { data: snaps } = await admin
+      .from('context_snapshots')
+      .select('id,topic_id,density,target,body,inputs,is_current')
+      .eq('topic_id', topicId);
+    snap = (snaps ?? [])[0] ?? null;
+    if (!snap) await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  record('the export is recorded in resume history', Boolean(snap),
+    snap
+      ? `${snap.target} · ${snap.density}`
+      : `no row (copy ${copyAcknowledged ? 'acknowledged' : 'never acknowledged'})`);
+
+  if (snap) {
+    record('history records what went into it',
+      Array.isArray(snap.inputs?.recordIds) && (snap.inputs?.approxTokens ?? 0) > 0,
+      `${(snap.inputs?.recordIds ?? []).length} record ids, ~${snap.inputs?.approxTokens} tokens`);
+    // AD-8: a snapshot is a rendering, not a record with authority.
+    record('the snapshot claims no authority', snap.is_current === false,
+      `is_current ${snap.is_current}`);
+    record('the stored body is the generated document',
+      String(snap.body).includes('ContextShelf Resume Context'), 'body stored verbatim');
+  }
+
+  // Subtopic scope.
+  const { data: subs } = await admin.from('subtopics').select('id,name').eq('topic_id', topicId);
+  const sub = (subs ?? [])[0] ?? null;
+  qaSubtopicId = sub?.id ?? null;
+  if (sub) {
+    await a.goto(`${BASE}/topics/${topicId}/resume?subtopic=${sub.id}`, { waitUntil: 'networkidle' });
+    await a.waitForFunction(() => /ContextShelf Resume Context/.test(document.body.innerText), null, { timeout: 30_000 }).catch(() => {});
+    const subPreview = await previewText();
+    record('a subtopic resume generates and names the subtopic',
+      subPreview.includes(String(sub.name)), sub.name);
+    record('a subtopic resume still carries topic-level constraints',
+      subPreview.includes('Active Decisions'), 'project-wide decisions kept');
+  }
+
   // --- C. Persists across a hard reload -------------------------------------
   heading('C. Persistence across a hard reload');
   await a.reload({ waitUntil: 'networkidle' });
@@ -655,6 +764,28 @@ try {
       .from('search_documents').select('workspace_id').neq('workspace_id', dbTopic.workspace_id).limit(5);
     record('an unfiltered search read returns no foreign rows',
       (ownLeak ?? []).length === 0, `${(ownLeak ?? []).length} foreign row(s)`);
+
+    // A resume export is the most concentrated record in the system: one row
+    // holding a topic's goal, state, decisions and rejected directions in
+    // readable prose. Leaking one leaks more than leaking any single record.
+    const { data: histLeak } = await userB.from('context_snapshots').select('id,topic_id,body,inputs');
+    record("resume history does not leak to the second account",
+      (histLeak ?? []).length === 0,
+      (histLeak ?? []).length ? `LEAKED ${(histLeak ?? []).length} export(s)` : 'nothing returned');
+
+    const { error: writeErr } = await userB.from('context_snapshots').insert({
+      workspace_id: dbTopic.workspace_id, topic_id: dbTopic.id,
+      density: 'standard', target: 'claude_chat', body: 'graffiti',
+    });
+    record('the second account cannot record an export against the first account\'s topic',
+      Boolean(writeErr), writeErr ? 'refused' : 'ACCEPTED — history is writable across accounts');
+
+    // And the Resume page itself is not reachable.
+    await b.goto(`${BASE}/topics/${dbTopic.id}/resume`, { waitUntil: 'networkidle' });
+    const bResume = await b.content();
+    record('the resume page is denied to the second account',
+      !bResume.includes('ContextShelf Resume Context'),
+      bResume.includes('ContextShelf Resume Context') ? 'LEAKED' : 'not generated');
   }
 
   await ctxB.close();
@@ -681,7 +812,22 @@ try {
       {
         cwd: ROOT,
         encoding: 'utf8',
-        env: { ...process.env, CONTEXTSHELF_QA_COOKIE: JSON.stringify(cookies) },
+        env: {
+          ...process.env,
+          CONTEXTSHELF_QA_COOKIE: JSON.stringify(cookies),
+          // The Resume flow lives under a topic, so its URL only exists once a
+          // topic does. Passing the ids the run just created is what keeps
+          // these states audited rather than silently absent.
+          CONTEXTSHELF_QA_EXTRA_PAGES: JSON.stringify(
+            [
+              topicId ? { path: `/topics/${topicId}`, name: 'topic' } : null,
+              topicId ? { path: `/topics/${topicId}/resume`, name: 'resume' } : null,
+              topicId && qaSubtopicId
+                ? { path: `/topics/${topicId}/resume?subtopic=${qaSubtopicId}`, name: 'resume-subtopic' }
+                : null,
+            ].filter(Boolean),
+          ),
+        },
       },
     );
     const out = `${qa.stdout ?? ''}${qa.stderr ?? ''}`;

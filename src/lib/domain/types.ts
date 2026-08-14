@@ -474,7 +474,24 @@ export interface TopicContext {
   supersededDecisions: Decision[];
   rejectedIdeas: Idea[];
   openActions: Action[];
-  winningPrompts: Array<{ prompt: Prompt; version: PromptVersion | null }>;
+  /**
+   * The prompts with a winning selection, resolved to the EXACT version that
+   * won (rule 9a) — plus every version, so history stays visible.
+   *
+   * `version` is not the latest. That distinction is the whole reason
+   * `prompt_winning_selections` exists: once a prompt has several versions, the
+   * newest is often a later experiment that did worse, and a Resume export that
+   * pasted it under "this one worked" would be actively harmful.
+   */
+  winningPrompts: Array<{
+    prompt: Prompt;
+    /** The winning version, or null when the selection points at a version that is gone. */
+    version: PromptVersion | null;
+    /** Every version of this prompt, newest first. */
+    versions: PromptVersion[];
+    /** Why this version was chosen, recorded at selection time. */
+    reason: string | null;
+  }>;
   files: FileReference[];
   milestones: Milestone[];
   sessions: SourceSession[];

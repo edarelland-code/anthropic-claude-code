@@ -14,6 +14,9 @@ import { AddEntryForm } from './add-entry-form';
 import { AddSubtopicForm } from './add-subtopic-form';
 import { CurrentStateForm } from './current-state-form';
 import { OpenIssues } from './open-issues';
+import { DecisionControls } from '@/components/topics/lifecycle-controls';
+import { SubtopicResume } from '@/components/topics/subtopic-resume';
+
 import { ResumePanel } from './resume-panel';
 
 export const dynamic = 'force-dynamic';
@@ -27,21 +30,20 @@ export default async function TopicPage({ params }: { params: Promise<{ topicId:
   const { topic, subtopics, counts, currentEntries, timeline, activeDecisions, openActions } = ctx;
 
   // Master Topic Memory is derived on every read (AD-8), so it cannot drift
-  // from the records beneath it. The winning VERSION is resolved per prompt —
-  // the latest version is often a later experiment that did worse.
-  const prompts = await data.prompts.listForTopic(topicId);
-  const promptsWithWinners = await Promise.all(
-    prompts.map(async ({ prompt }) => {
-      const full = await data.prompts.getWithVersions(prompt.id);
-      const winning = await data.prompts.getWinning(prompt.id);
-      return {
-        prompt,
-        versions: full?.versions ?? [],
-        winningVersionId: winning?.versionId ?? null,
-        winningReason: winning?.reason ?? null,
-      };
-    }),
-  );
+  // from the records beneath it.
+  //
+  // The winning versions come from `getContext`, which resolves them from
+  // `prompt_current_winning` in the same batched read as everything else. This
+  // used to loop over the prompts issuing two queries each — a real N+1 that
+  // grew with the topic — and it only existed because `ctx.winningPrompts`
+  // could not be trusted to name the right version. Now that it can, the loop
+  // is not needed.
+  const promptsWithWinners = ctx.winningPrompts.map((w) => ({
+    prompt: w.prompt,
+    versions: w.versions,
+    winningVersionId: w.version?.id ?? null,
+    winningReason: w.reason,
+  }));
   const memory = assembleMemory({
     topic,
     subtopics,
@@ -122,9 +124,10 @@ export default async function TopicPage({ params }: { params: Promise<{ topicId:
               ) : (
                 <ul className="mt-3 space-y-2.5">
                   {activeDecisions.map((d) => (
-                    <li key={d.id} className="border-l-2 border-violet-500 pl-2.5">
+                    <li key={d.id} id={d.id} className="border-l-2 border-violet-500 pl-2.5">
                       <p className="text-sm font-medium">{d.title}</p>
                       {d.reason && <p className="mt-0.5 text-sm leading-5 muted">{d.reason}</p>}
+                      <DecisionControls decision={d} topicId={topic.id} />
                     </li>
                   ))}
                 </ul>
@@ -174,11 +177,12 @@ export default async function TopicPage({ params }: { params: Promise<{ topicId:
             {subtopics.length > 0 && (
               <ul className="mt-3 grid gap-2 sm:grid-cols-2">
                 {subtopics.map((s) => (
-                  <li key={s.id} className="rounded-md border p-2.5 hairline">
+                  <li key={s.id} id={s.id} className="rounded-md border p-2.5 hairline">
                     <p className="truncate text-sm font-medium">{s.name}</p>
                     {s.description && (
                       <p className="mt-0.5 line-clamp-2 text-xs leading-5 muted">{s.description}</p>
                     )}
+                    <SubtopicResume subtopic={s} topicId={topic.id} />
                   </li>
                 ))}
               </ul>
@@ -259,7 +263,7 @@ export default async function TopicPage({ params }: { params: Promise<{ topicId:
 
         {/* Right contextual panel — becomes a section on mobile, not a hidden gesture */}
         <aside className="space-y-4 lg:sticky lg:top-6 lg:self-start">
-          <ResumePanel topic={topic} />
+          <ResumePanel topic={topic} subtopics={subtopics} />
 
           <section className="rounded-lg p-4 surface">
             <h2 className="flex items-center gap-2 text-sm font-semibold">

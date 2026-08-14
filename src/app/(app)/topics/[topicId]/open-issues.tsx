@@ -72,7 +72,7 @@ export function OpenIssues({ topicId, actions }: { topicId: string; actions: Act
           <select
             name="kind"
             defaultValue="next_step"
-            className="shrink-0 rounded-md px-2 py-2 text-sm surface"
+            className="min-h-11 shrink-0 rounded-md px-2 text-sm surface"
             aria-label="Kind"
           >
             <option value="next_step">Next step</option>
