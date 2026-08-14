@@ -104,6 +104,8 @@ These are permanent. Changing one requires the process at the bottom of this fil
 | AD-12 | **The schema is tested against a real ephemeral Postgres** (`npm run test:db`) | "The SQL looks correct" is not validation. This harness caught a privilege-escalation bug in the `workspace_members` insert policy |
 | AD-13 | **Both PKCE (`code`) and OTP (`token_hash`) sign-in links are accepted** | PKCE binds a link to the device that requested it, which breaks the Mac/Windows workflow this product exists to serve |
 | AD-14 | **`main` is the stable branch; work happens on feature branches** | See the Git workflow below |
+| AD-15 | **Hosted verification runs over the Management API when the Postgres wire protocol is unreachable** | Some environments permit HTTPS but not `:5432`/`:6543`. `db push` and `db diff --linked` then cannot run at all. The migration, the two hosted suites, and schema parity all work over HTTPS instead, so "the hosted database is correct" stays checkable rather than assumed. The CLI path remains preferred wherever it works |
+| AD-16 | **Hosted validation asserts rows in the database, never only rendered text** | A page-content check reported two knowledge entries created while `knowledge_entries` was empty — the submit had hit a different form on the same page and created an action. Text on a page is evidence the app rendered something; only the row is evidence of persistence |
 
 ---
 
@@ -143,9 +145,14 @@ npm run test:db      # real ephemeral Postgres: migration + RLS + history guaran
 npm run test:responsive -- <url>   # real Chromium at 1440/1280/768/390/375
 npm run db:push      # apply supabase/migrations to the linked project
 npm run db:types     # regenerate adapter-internal DB types
+
+npm run provision            # the whole hosted sequence: link, migrate, verify, deploy
+npm run schema:parity        # hosted vs repository catalogs, without a Postgres connection
+npm run validate:hosted -- <url>   # auth, persistence, isolation, provenance, authenticated QA
 ```
 
-All five must pass before merging to `main`.
+All five of `build`, `typecheck`, `lint`, `test`, and `test:db` must pass before merging to
+`main`.
 
 ## Layout
 
