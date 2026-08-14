@@ -89,5 +89,10 @@ function CountList({ counts }: { counts: TopicSummary['counts'] }) {
   if (counts.prompts) parts.push(`${counts.prompts} prompts`);
   if (counts.files) parts.push(`${counts.files} files`);
   if (parts.length === 0) return <span>No entries yet</span>;
-  return <span className="truncate">{parts.join(' · ')}</span>;
+  // `truncate` alone does nothing to a flex item: its default `min-width:auto`
+  // refuses to shrink below the text's intrinsic width, so a topic with six
+  // populated counts pushed the whole card ~358px wide and overflowed the page
+  // by 32px at 390 and 47px at 375 — the same absolute width both times, which
+  // is what identified it. `min-w-0` is what lets the ellipsis happen.
+  return <span className="min-w-0 flex-1 truncate">{parts.join(' · ')}</span>;
 }

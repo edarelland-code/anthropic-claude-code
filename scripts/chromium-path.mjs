@@ -53,11 +53,31 @@ export function chromiumExecutable() {
 /**
  * Launch options that work whether or not the pinned build is present.
  *
- * Chromium does not read HTTPS_PROXY, so in a sandbox that reaches the
- * internet only through one it resets every connection while curl on the same
- * host succeeds. Passing the proxy explicitly is what makes a hosted URL
- * reachable from a test browser. Loopback stays direct so a local dev server
- * is not routed through it.
+ * Two accommodations, both needed only because the sandbox reaches the
+ * internet through a proxy.
+ *
+ * 1. Chromium does not read HTTPS_PROXY. Without being told, it fails every
+ *    request while curl on the same host succeeds. Loopback stays direct so a
+ *    local dev server is not routed through the proxy.
+ *
+ * 2. Chromium's TLS 1.3 ClientHello carries a post-quantum key share and comes
+ *    to roughly 1700 bytes, which spans more than one TCP segment. The relay
+ *    on the far side of this proxy resets the connection when it does, so the
+ *    tunnel is established (`200 Connection Established`) and then dies mid
+ *    handshake — surfacing as a bare ERR_CONNECTION_RESET on a URL curl
+ *    fetches perfectly, with nothing in the proxy's own log. Capping at TLS
+ *    1.2 keeps the ClientHello inside one segment.
+ *
+ *    Verified rather than guessed: the net log shows a 1733-byte ClientHello
+ *    followed immediately by ECONNRESET, and every narrower fix
+ *    (--disable-features for the post-quantum key agreement under each of its
+ *    names, ECH off, HTTP/2 off, QUIC off) leaves it failing.
+ *
+ *    This lowers the TLS version a *test* browser negotiates with our own
+ *    deployment. It does NOT disable certificate verification — the chain,
+ *    hostname and expiry are all still checked, and a bad certificate still
+ *    fails the run. It is applied only when a proxy is configured, so a normal
+ *    machine negotiates TLS 1.3 as usual.
  */
 export function launchOptions(extra = {}) {
   const executablePath = chromiumExecutable();
@@ -67,7 +87,11 @@ export function launchOptions(extra = {}) {
     ...(proxyServer
       ? { proxy: { server: proxyServer, bypass: 'localhost,127.0.0.1,::1' } }
       : {}),
-    args: ['--no-sandbox', '--disable-dev-shm-usage'],
+    args: [
+      '--no-sandbox',
+      '--disable-dev-shm-usage',
+      ...(proxyServer ? ['--ssl-version-max=tls1.2'] : []),
+    ],
     ...extra,
   };
 }

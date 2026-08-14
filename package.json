@@ -12,6 +12,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "db:push": "supabase db push",
+    "db:push:hosted": "node scripts/migrate-hosted.mjs",
     "db:types": "supabase gen types typescript --linked > src/lib/adapters/supabase/database.types.ts",
     "test:db": "bash scripts/db-test.sh",
     "test:responsive": "node scripts/responsive-qa.mjs",
