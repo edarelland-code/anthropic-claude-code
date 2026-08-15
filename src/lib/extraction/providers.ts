@@ -229,9 +229,16 @@ export const anthropicProvider: ExtractionProvider = {
       // The status and the provider's own message, never the request — which
       // carries both the key and the user's source.
       const detail = await response.text().catch(() => '');
+      const rejected = response.status === 401 || response.status === 403;
       throw new ExtractionError(
-        `The model provider returned ${response.status}.`,
-        response.status === 401 || response.status === 403 ? 'not_configured' : 'provider_error',
+        // A bare "returned 401" sends someone looking at their model
+        // identifier, their network and their payload before the one thing it
+        // can actually be. The status alone is not an actionable sentence
+        // (rule 17a), and this is the failure a first connection hits.
+        rejected
+          ? `The model provider rejected the API key (${response.status}). ANTHROPIC_API_KEY in the server environment is missing, mistyped, revoked, or belongs to a different account — it is not a problem with the source or the model identifier.`
+          : `The model provider returned ${response.status}.`,
+        rejected ? 'not_configured' : 'provider_error',
         detail.slice(0, 400),
       );
     }
