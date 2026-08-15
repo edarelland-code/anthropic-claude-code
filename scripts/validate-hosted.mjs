@@ -1113,7 +1113,7 @@ try {
     const xRun = (xRunRows ?? [])[0] ?? null;
 
     record('an extraction run is recorded with its provider and prompt version',
-      Boolean(xRun) && xRun.provider === 'deterministic' && xRun.prompt_version === '1',
+      Boolean(xRun) && xRun.provider === 'deterministic' && xRun.prompt_version === '2',
       xRun ? `${xRun.provider} · prompt v${xRun.prompt_version} · ${xRun.status}` : 'no run');
     record('no model was called', Boolean(xRun) && xRun.model === null, 'model null');
 

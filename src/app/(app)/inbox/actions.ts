@@ -8,6 +8,7 @@ import { getData } from '@/lib/data';
 import { INGESTION_STATUSES, KNOWLEDGE_TYPES, SOURCE_TYPES } from '@/lib/domain/types';
 import { toUserFacingError } from '@/lib/errors';
 import { detectAdapter, normalize } from '@/lib/ingestion/adapters';
+import { normaliseNewlines } from '@/lib/forms';
 
 export interface FormState {
   error: string | null;
@@ -34,6 +35,7 @@ const captureSchema = z.object({
 });
 
 export async function captureAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  normaliseNewlines(formData);
   const parsed = captureSchema.safeParse({
     content: formData.get('content'),
     sourceHint: formData.get('sourceHint') || undefined,
@@ -87,6 +89,7 @@ const processSchema = z.object({
 });
 
 export async function processAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  normaliseNewlines(formData);
   const parsed = processSchema.safeParse({
     id: formData.get('id'),
     topicId: formData.get('topicId'),
@@ -150,6 +153,7 @@ const importSchema = z.object({
 });
 
 export async function importAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  normaliseNewlines(formData);
   const parsed = importSchema.safeParse({
     adapterId: formData.get('adapterId'),
     sourceType: formData.get('sourceType'),
@@ -219,6 +223,7 @@ export async function setInboxStatusAction(
   _prev: FormState,
   formData: FormData,
 ): Promise<FormState> {
+  normaliseNewlines(formData);
   const parsed = statusSchema.safeParse({
     id: formData.get('id'),
     status: formData.get('status'),

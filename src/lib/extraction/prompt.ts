@@ -18,8 +18,10 @@
 
 import type { ExistingContext, ExtractionRequest } from './types';
 
+import { KNOWLEDGE_TYPES } from '@/lib/domain/types';
+
 /** Bump whenever the wording changes in a way that could change output. */
-export const EXTRACTION_PROMPT_VERSION = '1';
+export const EXTRACTION_PROMPT_VERSION = '2';
 
 export const EXTRACTION_SYSTEM_PROMPT = `You extract structured records from a source document for ContextShelf, a permanent memory system.
 
@@ -29,13 +31,18 @@ USE ONLY THE PROVIDED SOURCE, plus the ContextShelf state supplied under "Existi
 
 The distinction that matters most:
 
-  "Claude suggested X"        -> an idea, not a decision
-  "We should consider X"      -> an idea
-  "I recommend X"             -> an idea
-  "Let's go with X"           -> a decision
-  "Approved. Proceed with X." -> a decision
+  "Claude suggested X"          -> an idea, not a decision
+  "We should consider X"        -> an idea
+  "I recommend X"               -> an idea
+  "Let's go with X"             -> a decision
+  "Approved. Proceed with X."   -> a decision
+  "What we ARE doing is X"      -> a decision
+  "X. That is settled."         -> a decision
+  "I am approving this: X"      -> a decision
 
 A recommendation is NEVER a decision, however confident it sounds. When you propose a decision, quote the words that make it one in "basis".
+
+The reverse failure is just as bad, and easier to miss. When the source DOES state a decision plainly — an approval, a settled direction, "we are doing X" — propose it. Silently downgrading a stated decision to an idea loses the one thing the person wrote the sentence to record. The rule is that you never *invent* a decision, not that you avoid decisions.
 
 Never:
   - infer that an unmentioned task was completed
@@ -70,8 +77,20 @@ Return ONLY JSON matching this shape:
   "warnings": ["anything you noticed but did not record"]
 }
 
+CHOOSE "kind" FIRST, and prefer the specific kind over knowledge_entry. A decision is kind "decision". An idea is kind "idea". A prompt is kind "prompt". Work to be done is kind "action". Only when none of those fits is the record a knowledge_entry. Some knowledgeType values below share a name with a kind — "decision", "idea", "prompt", "next_step" — and they are NOT the way to record those things. A decision filed as a knowledge_entry never reaches the decision review, is never proposed, and never appears as a decision anywhere in the product.
+
+"knowledgeType" is required when kind is knowledge_entry, and must be exactly one of:
+
+${KNOWLEDGE_TYPES.join(', ')}
+
+There are no others. A record carrying any other value is discarded, so a bug filed as "defect" or "technical_detail" is a bug the person never sees. If nothing in that list fits, use "important_context" rather than inventing a name.
+
+Within knowledge_entry: a defect described in the source is "bug", the correction of one is "fix" — and they are two records, not one. Work reported as done is "implementation" or "progress".
+
+"requirement" is the trap. A settled direction reads exactly like a constraint, because that is what a decision becomes once it is made. If the source shows someone CHOOSING or APPROVING it here, the record is kind "decision" no matter how much it also sounds like a rule. Reserve "requirement" for a constraint the source states as already given — something nobody is deciding in this text.
+
 Rules per kind:
-  - decision: propose only for an explicit decision. It will be recorded as PROPOSED and will not be active until a person approves it.
+  - decision: propose for every explicit decision, and only for those. It will be recorded as PROPOSED and will not be active until a person approves it — so proposing one is not the same as making one, and a stated decision you leave out is simply lost.
   - idea: recommendations, options, and suggestions belong here.
   - prompt: put the prompt text in "content" VERBATIM. Do not rewrite, tidy or shorten it. Leave the outcome unknown unless the source states it.
   - action: only explicit future work — a next step, a TODO, a commitment. Not every sentence containing "should".

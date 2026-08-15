@@ -114,22 +114,32 @@ State" would be the system pretending to understand.
 Set in Vercel **production**, server-side only:
 
 ```
-ANTHROPIC_API_KEY=sk-ant-…                       required
-CONTEXTSHELF_EXTRACTION_MODEL=claude-sonnet-4-5  optional; this is the default
+ANTHROPIC_API_KEY=sk-ant-…              the API key
+CONTEXTSHELF_EXTRACTION_MODEL=…         the model identifier
 ```
+
+**Both are required**, and there is no built-in default model. A default would be a claim that some
+particular model had been chosen and validated for this task, and none has — so the provider reports
+`CONTEXTSHELF_EXTRACTION_MODEL is not set` rather than substituting one. Pick a current Claude model
+identifier from Anthropic's own model list at the time you configure it; the choice is a
+recommendation to make, not a value this code assumes.
 
 Nothing goes in the client bundle, in git, in `CLAUDE.md`, or in any log. There is deliberately no
 place in the app to paste a key: storing one per user would mean encrypting it at rest, which
 would mean a key-management dependency this deployment does not have.
 
-**Expected cost.** One call per chunk, only when someone presses Extract. A typical conversation is
-one chunk of roughly 10–20k input tokens returning ~2k — a fraction of a cent at Sonnet pricing. A
-long one splits into two or three. Nothing analyses automatically, and Claude Code deliveries never
-trigger a call.
+**Expected usage.** One request per chunk, and only when someone presses Extract. A typical
+conversation is a single chunk; a long one splits into two or three. **No monetary figure is
+stated or displayed anywhere** — ContextShelf records and shows input and output token counts only.
+Turning those into a price needs current published pricing for the model you configure, and a cost
+this product quoted from a stale rate would be worse than no number at all. Nothing analyses
+automatically, and Claude Code deliveries never trigger a request — asserted in
+`src/lib/extraction/readiness.test.ts`, not merely intended.
 
-**What validation would remain after the key is supplied:** the Anthropic client itself (the
-`extract()` body, which today refuses by name), a live call proving structured output validates
-against the existing schema, the fixtures 6AI cases 1–7 re-run against the model rather than the
+**What validation would remain after the key is supplied.** The client is now written — the
+request, the response parsing and the usage capture are all in place and inert. What cannot be
+claimed until a real call has been made: that a live response parses and validates against the
+existing schema, the fixtures 6AI cases 1–7 re-run against the model rather than the
 matcher, token/cost recording from a real response, and the pre-send credential flow exercised with
 a provider that actually sends.
 

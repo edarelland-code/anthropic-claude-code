@@ -21,7 +21,7 @@
 import { extractSegments } from '@/lib/ingestion/extract';
 import { suggestKnowledgeType } from '@/lib/ingestion/classify';
 
-import { EXTRACTION_PROMPT_VERSION } from './prompt';
+import { EXTRACTION_SYSTEM_PROMPT, renderRequest } from './prompt';
 import {
   ExtractionError,
   type ExtractionProvider,
@@ -139,39 +139,177 @@ export function shiftReference(reference: string | null, lineOffset: number): st
 // ---------------------------------------------------------------------------
 
 /**
- * The shape an Anthropic-backed provider takes, and the reason it is inert.
+ * Anthropic, implemented and inert (Phase 6 readiness).
  *
- * ContextShelf exists to support Claude workflows, so Anthropic is the natural
- * choice and this is written against the same interface so that connecting it
- * is a configuration change rather than a redesign. What it needs is an API key
- * and therefore a paid account — a dependency the product does not have and
- * that nobody should acquire on the user's behalf.
+ * The request is built here in full so that connecting it is a configuration
+ * change rather than a redesign. It cannot fire: `isConfigured()` is false
+ * without both an API key and a model identifier in the SERVER environment,
+ * `runExtraction` refuses an unconfigured provider before it ever reaches
+ * `extract()`, and `extract()` refuses again on its own.
  *
- * There is also a second, quieter reason it stops here: a key belongs in the
- * server environment, not in a table. Storing one per user would mean
- * encrypting it at rest, which means a key-management dependency this
- * deployment does not have. Until that is decided, "not configured" is the
- * honest state, and it is reported rather than hidden.
+ * **No model is hard-coded.** `CONTEXTSHELF_EXTRACTION_MODEL` is the only
+ * source of the identifier, and when it is unset the provider reports that
+ * rather than substituting a default. A default would be a claim that some
+ * particular model had been chosen and validated for this task, and none has.
+ * A suggested starting point is documented in `docs/DEPLOYMENT.md`, where it is
+ * a recommendation to a person rather than a value the code assumes.
+ *
+ * The key is read from `process.env` at call time and never held, logged,
+ * returned, or written to `extraction_runs`. `model` IS recorded, because
+ * "which model produced this suggestion" is exactly what an audit needs.
  */
+const ANTHROPIC_ENDPOINT = 'https://api.anthropic.com/v1/messages';
+const ANTHROPIC_VERSION = '2023-06-01';
+
+/** Read at call time, never cached, never exported. */
+const anthropicKey = () => process.env.ANTHROPIC_API_KEY?.trim() || null;
+const anthropicModel = () => process.env.CONTEXTSHELF_EXTRACTION_MODEL?.trim() || null;
+
 export const anthropicProvider: ExtractionProvider = {
   id: 'anthropic',
   label: 'Anthropic (Claude)',
-  model: process.env.CONTEXTSHELF_EXTRACTION_MODEL ?? 'claude-sonnet-4-5',
-  isConfigured: () => Boolean(process.env.ANTHROPIC_API_KEY),
-  configurationProblem: () =>
-    process.env.ANTHROPIC_API_KEY
-      ? null
-      : 'ANTHROPIC_API_KEY is not set. Model-assisted extraction needs an Anthropic API key in the server environment; built-in extraction works without one.',
+  get model() {
+    return anthropicModel();
+  },
+  isConfigured: () => anthropicKey() !== null && anthropicModel() !== null,
+  configurationProblem: () => {
+    const key = anthropicKey();
+    const model = anthropicModel();
+    // Configured is a real answer and has to be said first. Without this the
+    // chain fell through to the model message whenever a key was present, so a
+    // fully configured deployment reported "CONTEXTSHELF_EXTRACTION_MODEL is
+    // not set" on the same line as the model identifier it had just rendered.
+    if (key && model) return null;
+    if (!key && !model) {
+      return 'ANTHROPIC_API_KEY and CONTEXTSHELF_EXTRACTION_MODEL are not set. Both live in the server environment; built-in extraction works without either.';
+    }
+    if (!key) return 'ANTHROPIC_API_KEY is not set in the server environment.';
+    return 'CONTEXTSHELF_EXTRACTION_MODEL is not set. No default is assumed, because no model has been validated for this task — see docs/DEPLOYMENT.md.';
+  },
   sendsContentExternally: true,
 
-  async extract(): Promise<ExtractionResult> {
-    // Not a stub that silently returns nothing — that would look like a source
-    // with no records in it. It refuses, by name, with the reason.
-    throw new ExtractionError(
-      'The Anthropic provider is not connected in this build.',
-      'not_configured',
-      `Prompt version ${EXTRACTION_PROMPT_VERSION} is ready and the contract is implemented, but no API client is wired and no key is configured. Use built-in extraction, or see docs/DEPLOYMENT.md.`,
-    );
+  async extract(request: ExtractionRequest): Promise<ExtractionResult> {
+    const key = anthropicKey();
+    const model = anthropicModel();
+    if (!key || !model) {
+      // Refused by name. A stub returning an empty result would be
+      // indistinguishable from a source containing nothing — the worst
+      // available failure here, because the user would file nothing and
+      // believe there was nothing to file.
+      throw new ExtractionError(
+        'AI-assisted extraction is not configured.',
+        'not_configured',
+        anthropicProvider.configurationProblem() ?? undefined,
+      );
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(ANTHROPIC_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': key,
+          'anthropic-version': ANTHROPIC_VERSION,
+        },
+        body: JSON.stringify({
+          model,
+          // Generous, because on current models `max_tokens` caps reasoning
+          // and answer TOGETHER. The first live call was written for a budget
+          // that assumed the whole allowance was the answer; a source that
+          // makes the model think returns JSON cut off mid-record, which
+          // arrives here as "the model did not return JSON" — a parse error
+          // standing in for a budget error.
+          max_tokens: 16_000,
+          // No `temperature`. It is refused outright by current models, and
+          // asking for zero never bought what the previous comment here
+          // claimed: it did not make a model reproducible, on any model.
+          system: EXTRACTION_SYSTEM_PROMPT,
+          messages: [{ role: 'user', content: renderRequest(request) }],
+        }),
+      });
+    } catch (cause) {
+      throw new ExtractionError(
+        'The model provider could not be reached.',
+        'provider_error',
+        cause instanceof Error ? cause.message : undefined,
+      );
+    }
+
+    if (!response.ok) {
+      // The status and the provider's own message, never the request — which
+      // carries both the key and the user's source.
+      const detail = await response.text().catch(() => '');
+      const rejected = response.status === 401 || response.status === 403;
+      throw new ExtractionError(
+        // A bare "returned 401" sends someone looking at their model
+        // identifier, their network and their payload before the one thing it
+        // can actually be. The status alone is not an actionable sentence
+        // (rule 17a), and this is the failure a first connection hits.
+        rejected
+          ? `The model provider rejected the API key (${response.status}). ANTHROPIC_API_KEY in the server environment is missing, mistyped, revoked, or belongs to a different account — it is not a problem with the source or the model identifier.`
+          : `The model provider returned ${response.status}.`,
+        rejected ? 'not_configured' : 'provider_error',
+        detail.slice(0, 400),
+      );
+    }
+
+    const body = (await response.json().catch(() => null)) as {
+      content?: Array<{ type?: string; text?: string }>;
+      stop_reason?: string;
+      stop_details?: { category?: string | null } | null;
+      usage?: { input_tokens?: number; output_tokens?: number };
+    } | null;
+
+    // Two outcomes that are HTTP 200 and are not an answer. Both would
+    // otherwise reach the JSON parse below and be reported as malformed
+    // output, which sends the reader looking at the wrong thing entirely.
+    if (body?.stop_reason === 'max_tokens') {
+      throw new ExtractionError(
+        'The model ran out of room before it finished the list of suggestions.',
+        'invalid_output',
+        'Nothing was saved, because a truncated list looks exactly like a short one. Analyse a smaller part of this source.',
+      );
+    }
+    if (body?.stop_reason === 'refusal') {
+      throw new ExtractionError(
+        'The model declined to read this source.',
+        'provider_error',
+        `The provider's safety systems refused the request${
+          body.stop_details?.category ? ` (${body.stop_details.category})` : ''
+        }. Your captured source is untouched — extract it deterministically, or file it by hand.`,
+      );
+    }
+
+    const text = (body?.content ?? [])
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text ?? '')
+      .join('')
+      .trim();
+
+    // Tolerate a fenced block around the JSON; refuse anything else. The
+    // caller validates the parsed object against the schema regardless — this
+    // only gets it as far as "is it JSON at all".
+    const json = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(json);
+    } catch {
+      throw new ExtractionError(
+        'The model did not return JSON.',
+        'invalid_output',
+        json.slice(0, 200),
+      );
+    }
+
+    // Usage is attached so it survives validation, which drops unknown fields.
+    return {
+      ...(parsed as Omit<ExtractionResult, 'usage'>),
+      usage: {
+        inputTokens: body?.usage?.input_tokens,
+        outputTokens: body?.usage?.output_tokens,
+      },
+    } as ExtractionResult;
   },
 };
 
@@ -202,17 +340,29 @@ export interface ProviderStatus {
   label: string;
   model: string | null;
   configured: boolean;
+  /** True for the one provider a run would actually use right now. */
+  active: boolean;
   problem: string | null;
   sendsContentExternally: boolean;
 }
 
-/** What Settings renders. Never includes a key, configured or not. */
+/**
+ * What Settings renders. Never includes a key, configured or not.
+ *
+ * `active` is computed from `defaultProvider()` rather than re-derived by the
+ * screen. Settings previously called the first *configured* provider active,
+ * and the deterministic one is always configured — so with a model connected
+ * the page said built-in extraction was active while every run went to the
+ * model. The rule for which provider runs lives in one place.
+ */
 export function providerStatuses(): ProviderStatus[] {
+  const activeId = defaultProvider().id;
   return PROVIDERS.map((p) => ({
     id: p.id,
     label: p.label,
     model: p.model,
     configured: p.isConfigured(),
+    active: p.id === activeId,
     problem: p.configurationProblem(),
     sendsContentExternally: p.sendsContentExternally,
   }));

@@ -19,6 +19,7 @@
     "contextshelf:sync": "node scripts/contextshelf-sync.mjs",
     "provision": "node scripts/provision.mjs",
     "validate:hosted": "node scripts/validate-hosted.mjs",
+    "validate:provider": "node scripts/validate-provider.mjs",
     "schema:parity": "node scripts/schema-parity.mjs",
     "verify:hosted": "node scripts/verify-hosted.mjs"
   },

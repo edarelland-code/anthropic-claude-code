@@ -179,7 +179,13 @@ export async function runExtraction(input: ExtractionInput): Promise<ExtractionO
       warnings,
       secrets,
       failureCode: lastFailure instanceof ExtractionError ? lastFailure.code : 'provider_error',
-      failureDetail: lastFailure?.message ?? null,
+      // The provider's own explanation is kept alongside the message. Dropping
+      // it left `failure_detail` saying only "returned 401", which names the
+      // symptom and not one thing the reader can act on.
+      failureDetail:
+        lastFailure instanceof ExtractionError && lastFailure.detail
+          ? `${lastFailure.message} (${lastFailure.detail})`
+          : (lastFailure?.message ?? null),
     });
   }
 

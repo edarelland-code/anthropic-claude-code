@@ -12,8 +12,13 @@ import { formatDate } from '@/lib/utils';
  *
  *   * **Deterministic extraction** — labels and phrasing. Always available,
  *     needs no key, sends nothing anywhere.
- *   * **AI-assisted extraction** — a model. Not configured, and said so
- *     plainly rather than dressed as "coming soon".
+ *   * **AI-assisted extraction** — a model. When no key is in the server
+ *     environment it says so plainly rather than dressing it as "coming soon";
+ *     when one is, it names the exact model identifier, because "which model
+ *     produced this suggestion" is the question an audit asks.
+ *
+ * Exactly one row reads Active, and it is the provider a run would really use —
+ * not the first configured one, which is always the built-in.
  *
  * There is no field to paste a key into, and that is deliberate rather than
  * unfinished: a key stored in the database would need encrypting at rest, and
@@ -27,8 +32,6 @@ export function ExtractionSettings({
   providers: ProviderStatus[];
   runs: ExtractionRun[];
 }) {
-  const active = providers.find((p) => p.configured);
-
   return (
     <section className="mt-4 rounded-lg p-4 surface">
       <h2 className="flex items-center gap-2 text-sm font-semibold">
@@ -55,7 +58,7 @@ export function ExtractionSettings({
               <span className="text-xs muted">{p.label}</span>
               {p.model && <code className="text-[11px] muted">{p.model}</code>}
               <span className="ml-auto text-xs muted">
-                {p.configured ? (active?.id === p.id ? 'Active' : 'Available') : 'Not configured'}
+                {p.active ? 'Active' : p.configured ? 'Available' : 'Not configured'}
               </span>
             </div>
             <p className="mt-1 text-xs leading-5 muted">
