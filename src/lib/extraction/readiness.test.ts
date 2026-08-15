@@ -3,8 +3,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { runExtraction } from './service';
-import { caseWithSecrets } from './fixtures';
-import { anthropicProvider, providerStatuses } from './providers';
+import { caseMixedTranscript, caseWithSecrets } from './fixtures';
+import { anthropicProvider, defaultProvider, deterministicProvider, providerStatuses } from './providers';
 import type { ExtractionProvider, ExtractionResult } from './types';
 
 /**
@@ -227,6 +227,75 @@ describe('the Anthropic request and its non-answers', () => {
     // "returned 401" sends a reader checking their model and their network
     // before the one thing it can actually be.
     await expect(anthropicProvider.extract(request)).rejects.toThrow(/rejected the API key/i);
+  });
+});
+
+/**
+ * The floor, asserted rather than assumed.
+ *
+ * Connecting a provider must not make one mandatory. This is the guarantee the
+ * hosted suite used to carry as a side effect of nothing being configured —
+ * once production had a key, that assertion started describing the deployment
+ * instead of the product, so the guarantee moved here where no environment can
+ * take it away.
+ */
+describe('with no provider configured, the product still works', () => {
+  const KEY = 'ANTHROPIC_API_KEY';
+  const MODEL = 'CONTEXTSHELF_EXTRACTION_MODEL';
+  const original = { key: process.env[KEY], model: process.env[MODEL], fetch: globalThis.fetch };
+
+  beforeEach(() => {
+    delete process.env[KEY];
+    delete process.env[MODEL];
+    // Any outbound call at all is the failure this suite exists to catch.
+    globalThis.fetch = (async () => {
+      throw new Error('a provider was called with nothing configured');
+    }) as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    if (original.key === undefined) delete process.env[KEY];
+    else process.env[KEY] = original.key;
+    if (original.model === undefined) delete process.env[MODEL];
+    else process.env[MODEL] = original.model;
+    globalThis.fetch = original.fetch;
+  });
+
+  it('falls back to deterministic extraction rather than failing', () => {
+    expect(defaultProvider().id).toBe('deterministic');
+    expect(deterministicProvider.isConfigured()).toBe(true);
+    expect(deterministicProvider.configurationProblem()).toBeNull();
+  });
+
+  it('still produces reviewable suggestions from a real source', async () => {
+    const outcome = await runExtraction({
+      ...base,
+      source: caseMixedTranscript,
+      provider: defaultProvider(),
+    });
+    expect(outcome.status).toBe('succeeded');
+    expect(outcome.provider).toBe('deterministic');
+    expect(outcome.suggestions.length).toBeGreaterThan(0);
+    // No model ran, so there is no model to name and no usage to report.
+    expect(outcome.model).toBeNull();
+    expect(outcome.usage).toBeNull();
+  });
+
+  it('sends nothing anywhere', async () => {
+    expect(deterministicProvider.sendsContentExternally).toBe(false);
+    // The stubbed fetch throws; reaching it would surface here rather than as
+    // a silent network call in production.
+    await expect(
+      runExtraction({ ...base, source: caseMixedTranscript, provider: defaultProvider() }),
+    ).resolves.toMatchObject({ status: 'succeeded' });
+  });
+
+  it('refuses the model provider by name instead of pretending', async () => {
+    expect(anthropicProvider.isConfigured()).toBe(false);
+    const outcome = await runExtraction({ ...base, source: 'anything', provider: anthropicProvider });
+    expect(outcome.status).toBe('failed');
+    expect(outcome.failureCode).toBe('not_configured');
+    expect(outcome.failureDetail).toMatch(/ANTHROPIC_API_KEY and CONTEXTSHELF_EXTRACTION_MODEL/);
   });
 });
 

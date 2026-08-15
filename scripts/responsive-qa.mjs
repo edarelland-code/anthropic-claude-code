@@ -75,9 +75,30 @@ function fail(msg) {
   failures.push(msg);
 }
 
+/**
+ * Navigates, tolerating one cold start.
+ *
+ * `networkidle` against a serverless deployment can exceed 20s on the first
+ * request to a route nobody has hit recently. That threw, the page went
+ * unaudited, and the run reported a layout failure for a page whose layout was
+ * never examined — a false alarm indistinguishable from a real one.
+ *
+ * Only the navigation is retried. Every layout assertion below is unchanged:
+ * a page that loads and is wrong still fails, and a page that will not load on
+ * the second attempt is still reported.
+ */
+async function navigate(page, url) {
+  try {
+    return await page.goto(url, { waitUntil: 'networkidle', timeout: 20_000 });
+  } catch (cause) {
+    if (!/timeout/i.test(cause.message)) throw cause;
+    return page.goto(url, { waitUntil: 'networkidle', timeout: 45_000 });
+  }
+}
+
 async function auditPage(page, vp, spec) {
   const url = `${BASE}${spec.path}`;
-  const response = await page.goto(url, { waitUntil: 'networkidle', timeout: 20_000 });
+  const response = await navigate(page, url);
   const status = response?.status() ?? 0;
   const landed = new URL(page.url()).pathname;
 
