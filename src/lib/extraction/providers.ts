@@ -214,10 +214,16 @@ export const anthropicProvider: ExtractionProvider = {
         },
         body: JSON.stringify({
           model,
-          max_tokens: 8_000,
-          // Zero, so the same source yields the same suggestions twice. A
-          // review the user cannot reproduce is one they cannot check.
-          temperature: 0,
+          // Generous, because on current models `max_tokens` caps reasoning
+          // and answer TOGETHER. The first live call was written for a budget
+          // that assumed the whole allowance was the answer; a source that
+          // makes the model think returns JSON cut off mid-record, which
+          // arrives here as "the model did not return JSON" — a parse error
+          // standing in for a budget error.
+          max_tokens: 16_000,
+          // No `temperature`. It is refused outright by current models, and
+          // asking for zero never bought what the previous comment here
+          // claimed: it did not make a model reproducible, on any model.
           system: EXTRACTION_SYSTEM_PROMPT,
           messages: [{ role: 'user', content: renderRequest(request) }],
         }),
@@ -250,8 +256,30 @@ export const anthropicProvider: ExtractionProvider = {
 
     const body = (await response.json().catch(() => null)) as {
       content?: Array<{ type?: string; text?: string }>;
+      stop_reason?: string;
+      stop_details?: { category?: string | null } | null;
       usage?: { input_tokens?: number; output_tokens?: number };
     } | null;
+
+    // Two outcomes that are HTTP 200 and are not an answer. Both would
+    // otherwise reach the JSON parse below and be reported as malformed
+    // output, which sends the reader looking at the wrong thing entirely.
+    if (body?.stop_reason === 'max_tokens') {
+      throw new ExtractionError(
+        'The model ran out of room before it finished the list of suggestions.',
+        'invalid_output',
+        'Nothing was saved, because a truncated list looks exactly like a short one. Analyse a smaller part of this source.',
+      );
+    }
+    if (body?.stop_reason === 'refusal') {
+      throw new ExtractionError(
+        'The model declined to read this source.',
+        'provider_error',
+        `The provider's safety systems refused the request${
+          body.stop_details?.category ? ` (${body.stop_details.category})` : ''
+        }. Your captured source is untouched — extract it deterministically, or file it by hand.`,
+      );
+    }
 
     const text = (body?.content ?? [])
       .filter((b) => b.type === 'text')

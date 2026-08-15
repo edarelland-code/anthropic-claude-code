@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -141,6 +141,92 @@ describe('the provider reports its own state truthfully', () => {
     set(KEY, 'sk-ant-test-not-a-real-key');
     set(MODEL, 'claude-test-model');
     expect(JSON.stringify(providerStatuses())).not.toContain('sk-ant-');
+  });
+});
+
+/**
+ * The request Anthropic actually receives, and the two answers that arrive as
+ * HTTP 200 and are not an answer. All three were found by making real calls.
+ */
+describe('the Anthropic request and its non-answers', () => {
+  const KEY = 'ANTHROPIC_API_KEY';
+  const MODEL = 'CONTEXTSHELF_EXTRACTION_MODEL';
+  const original = { key: process.env[KEY], model: process.env[MODEL], fetch: globalThis.fetch };
+
+  const request = {
+    source: 'User: we approved the adapter change.',
+    lineOffset: 1,
+    chunkIndex: 0,
+    chunkCount: 1,
+    existingContext: null,
+    topicId: null,
+    subtopicId: null,
+  };
+
+  /** Captures the body and answers with whatever the case needs. */
+  const stub = (payload: unknown, status = 200) => {
+    const seen: { body: Record<string, unknown> | null } = { body: null };
+    globalThis.fetch = (async (_url: string, init: { body: string }) => {
+      seen.body = JSON.parse(init.body);
+      return {
+        ok: status >= 200 && status < 300,
+        status,
+        json: async () => payload,
+        text: async () => JSON.stringify(payload),
+      };
+    }) as unknown as typeof fetch;
+    return seen;
+  };
+
+  beforeEach(() => {
+    process.env[KEY] = 'sk-ant-test-not-a-real-key';
+    process.env[MODEL] = 'claude-test-model';
+  });
+
+  afterEach(() => {
+    if (original.key === undefined) delete process.env[KEY];
+    else process.env[KEY] = original.key;
+    if (original.model === undefined) delete process.env[MODEL];
+    else process.env[MODEL] = original.model;
+    globalThis.fetch = original.fetch;
+  });
+
+  it('sends no sampling parameters at all', async () => {
+    const seen = stub({
+      content: [{ type: 'text', text: '{"records":[]}' }],
+      usage: { input_tokens: 10, output_tokens: 2 },
+    });
+    await anthropicProvider.extract(request);
+    // Current models refuse these outright, and asking for temperature 0
+    // never bought reproducibility on the models that did accept it.
+    expect(seen.body).not.toHaveProperty('temperature');
+    expect(seen.body).not.toHaveProperty('top_p');
+    expect(seen.body).not.toHaveProperty('top_k');
+  });
+
+  it('leaves room for reasoning inside the token budget', async () => {
+    const seen = stub({ content: [{ type: 'text', text: '{"records":[]}' }] });
+    await anthropicProvider.extract(request);
+    // Reasoning and answer share this budget on current models, so a budget
+    // sized for the answer alone returns JSON cut off mid-record.
+    expect(seen.body?.max_tokens).toBeGreaterThanOrEqual(16_000);
+  });
+
+  it('reports a truncated answer as truncation, not as malformed JSON', async () => {
+    stub({ content: [{ type: 'text', text: '{"records":[{"kind":"dec' }], stop_reason: 'max_tokens' });
+    await expect(anthropicProvider.extract(request)).rejects.toThrow(/ran out of room/i);
+  });
+
+  it('reports a refusal as a refusal, and says the source is untouched', async () => {
+    stub({ content: [], stop_reason: 'refusal', stop_details: { category: 'cyber' } });
+    await expect(anthropicProvider.extract(request)).rejects.toThrow(/declined to read/i);
+  });
+
+  it('names a rejected key rather than only its status code', async () => {
+    stub({ error: { type: 'authentication_error', message: 'invalid x-api-key' } }, 401);
+    // "returned 401" sends a reader checking their model and their network
+    // before the one thing it can actually be.
+    await expect(anthropicProvider.extract(request)).rejects.toThrow(/rejected the API key/i);
   });
 });
 
