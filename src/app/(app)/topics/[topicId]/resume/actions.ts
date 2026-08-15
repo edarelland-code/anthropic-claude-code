@@ -10,6 +10,7 @@ import { assembleResumeContext } from '@/lib/resume/assemble';
 import { formatResume } from '@/lib/resume/format';
 import { reductionSuggestions } from '@/lib/resume/size';
 import type { ResumeContext } from '@/lib/resume/types';
+import { normaliseNewlines } from '@/lib/forms';
 
 export interface FormState {
   error: string | null;
@@ -251,6 +252,7 @@ export async function deleteResumeExportAction(
   _prev: FormState,
   formData: FormData,
 ): Promise<FormState> {
+  normaliseNewlines(formData);
   const parsed = deleteSchema.safeParse({
     id: formData.get('id'),
     topicId: formData.get('topicId'),

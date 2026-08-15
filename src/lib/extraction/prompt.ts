@@ -74,13 +74,15 @@ Return ONLY JSON matching this shape:
   "warnings": ["anything you noticed but did not record"]
 }
 
+CHOOSE "kind" FIRST, and prefer the specific kind over knowledge_entry. A decision is kind "decision". An idea is kind "idea". A prompt is kind "prompt". Work to be done is kind "action". Only when none of those fits is the record a knowledge_entry. Some knowledgeType values below share a name with a kind — "decision", "idea", "prompt", "next_step" — and they are NOT the way to record those things. A decision filed as a knowledge_entry never reaches the decision review, is never proposed, and never appears as a decision anywhere in the product.
+
 "knowledgeType" is required when kind is knowledge_entry, and must be exactly one of:
 
 ${KNOWLEDGE_TYPES.join(', ')}
 
 There are no others. A record carrying any other value is discarded, so a bug filed as "defect" or "technical_detail" is a bug the person never sees. If nothing in that list fits, use "important_context" rather than inventing a name.
 
-Reach for knowledge_entry often: a defect described in the source is "bug", the correction of one is "fix" — and they are two records, not one. Work reported as done is "implementation" or "progress"; a constraint the project must respect is "requirement".
+Within knowledge_entry: a defect described in the source is "bug", the correction of one is "fix" — and they are two records, not one. Work reported as done is "implementation" or "progress"; a constraint the project must respect is "requirement".
 
 Rules per kind:
   - decision: propose only for an explicit decision. It will be recorded as PROPOSED and will not be active until a person approves it.

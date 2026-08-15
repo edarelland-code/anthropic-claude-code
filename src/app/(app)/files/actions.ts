@@ -5,6 +5,7 @@ import { z } from 'zod';
 
 import { getData } from '@/lib/data';
 import { toUserFacingError } from '@/lib/errors';
+import { normaliseNewlines } from '@/lib/forms';
 
 export interface FormState {
   error: string | null;
@@ -52,6 +53,7 @@ export async function createFileReferenceAction(
   _prev: FormState,
   formData: FormData,
 ): Promise<FormState> {
+  normaliseNewlines(formData);
   const parsed = createSchema.safeParse({
     topicId: formData.get('topicId'),
     subtopicId: formData.get('subtopicId') || null,

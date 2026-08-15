@@ -13,6 +13,7 @@ import {
   SOURCE_TYPES,
 } from '@/lib/domain/types';
 import { toUserFacingError } from '@/lib/errors';
+import { normaliseNewlines } from '@/lib/forms';
 
 export interface FormState {
   error: string | null;
@@ -25,6 +26,7 @@ const createTopicSchema = z.object({
 });
 
 export async function createTopicAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  normaliseNewlines(formData);
   const parsed = createTopicSchema.safeParse({
     name: formData.get('name'),
     description: formData.get('description') || undefined,
@@ -66,6 +68,7 @@ export async function createSubtopicAction(
   _prev: FormState,
   formData: FormData,
 ): Promise<FormState> {
+  normaliseNewlines(formData);
   const parsed = createSubtopicSchema.safeParse({
     topicId: formData.get('topicId'),
     name: formData.get('name'),
@@ -100,6 +103,7 @@ const createEntrySchema = z.object({
 });
 
 export async function createEntryAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  normaliseNewlines(formData);
   const parsed = createEntrySchema.safeParse({
     topicId: formData.get('topicId'),
     knowledgeType: formData.get('knowledgeType'),
@@ -140,6 +144,7 @@ const updateTopicSchema = z.object({
 });
 
 export async function updateTopicAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  normaliseNewlines(formData);
   const parsed = updateTopicSchema.safeParse({
     id: formData.get('id'),
     expectedUpdatedAt: formData.get('expectedUpdatedAt'),
@@ -180,6 +185,7 @@ const addActionSchema = z.object({
 });
 
 export async function addActionAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  normaliseNewlines(formData);
   const parsed = addActionSchema.safeParse({
     topicId: formData.get('topicId'),
     kind: formData.get('kind'),
@@ -237,6 +243,7 @@ export async function createDecisionAction(
   _prev: FormState,
   formData: FormData,
 ): Promise<FormState> {
+  normaliseNewlines(formData);
   const parsed = createDecisionSchema.safeParse({
     topicId: formData.get('topicId'),
     subtopicId: formData.get('subtopicId') || null,
@@ -286,6 +293,7 @@ const createIdeaSchema = z.object({
 });
 
 export async function createIdeaAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  normaliseNewlines(formData);
   const parsed = createIdeaSchema.safeParse({
     topicId: formData.get('topicId'),
     subtopicId: formData.get('subtopicId') || null,
@@ -335,6 +343,7 @@ const createPromptSchema = z.object({
 });
 
 export async function createPromptAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  normaliseNewlines(formData);
   const parsed = createPromptSchema.safeParse({
     topicId: formData.get('topicId'),
     subtopicId: formData.get('subtopicId') || null,
@@ -413,6 +422,7 @@ export async function updateSubtopicResumeAction(
   _prev: FormState,
   formData: FormData,
 ): Promise<FormState> {
+  normaliseNewlines(formData);
   const parsed = subtopicResumeSchema.safeParse({
     subtopicId: formData.get('subtopicId'),
     topicId: formData.get('topicId'),
@@ -460,6 +470,7 @@ export async function setDecisionStatusAction(
   _prev: FormState,
   formData: FormData,
 ): Promise<FormState> {
+  normaliseNewlines(formData);
   const parsed = decisionStatusSchema.safeParse({
     decisionId: formData.get('decisionId'),
     topicId: formData.get('topicId'),
@@ -498,6 +509,7 @@ export async function supersedeDecisionAction(
   _prev: FormState,
   formData: FormData,
 ): Promise<FormState> {
+  normaliseNewlines(formData);
   const parsed = supersedeDecisionSchema.safeParse({
     decisionId: formData.get('decisionId'),
     topicId: formData.get('topicId'),
@@ -548,6 +560,7 @@ export async function setIdeaStatusAction(
   _prev: FormState,
   formData: FormData,
 ): Promise<FormState> {
+  normaliseNewlines(formData);
   const parsed = ideaStatusSchema.safeParse({
     ideaId: formData.get('ideaId'),
     topicId: formData.get('topicId'),
@@ -588,6 +601,7 @@ const rateVersionSchema = z.object({
 });
 
 export async function rateVersionAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  normaliseNewlines(formData);
   const parsed = rateVersionSchema.safeParse({
     versionId: formData.get('versionId'),
     promptId: formData.get('promptId'),
@@ -629,6 +643,7 @@ const markWinningSchema = z.object({
 });
 
 export async function markWinningAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  normaliseNewlines(formData);
   const raw = formData.get('versionId');
   const parsed = markWinningSchema.safeParse({
     promptId: formData.get('promptId'),

@@ -626,7 +626,7 @@ try {
     `still ${topicAfter?.current_state === null ? 'null' : `“${String(topicAfter?.current_state).slice(0, 40)}”`}`);
 
   const { data: filedDecisions } = await admin
-    .from('decisions').select('id,title,status,superseded_by_id,supersedes_reason').eq('topic_id', topicId);
+    .from('decisions').select('id,title,status,superseded_by_id,supersede_reason').eq('topic_id', topicId);
   // One active decision existed before any of this — the conflict fixture.
   // Everything the review filed must be proposed.
   const activeDecisions = (filedDecisions ?? []).filter((d) => d.status === 'active');
@@ -670,7 +670,7 @@ try {
     (selections ?? []).length === 0, `${(selections ?? []).length} selections`);
 
   record('no supersession happens automatically',
-    (filedDecisions ?? []).every((d) => d.superseded_by_id === null && d.supersedes_reason === null),
+    (filedDecisions ?? []).every((d) => d.superseded_by_id === null && d.supersede_reason === null),
     'nothing superseded');
 
   const { data: deletions } = await admin
@@ -752,10 +752,18 @@ try {
     !resume.includes(`Proposed current state ${MARK}`),
     'the rejected Current State suggestion is absent');
 
-  const avoidSection = (resume.split('Avoid / Do Not Repeat')[1] ?? '').split('\n##')[0];
-  record('a proposed decision does not reach the avoid list',
-    !avoidSection.includes(editedTitle),
-    'proposed is pending, not rejected');
+  // Bounded at the next heading of any level. Splitting on '\n##' alone let
+  // the section run to the end of the document whenever Avoid was last, so
+  // every confirmed title in the whole Resume counted as "on the avoid list".
+  const avoidSection = (resume.split('Avoid / Do Not Repeat')[1] ?? '').split(/\n#{1,6} /)[0];
+  const proposedTitle = proposedDecisions[0]?.title ?? null;
+  if (proposedTitle === null) {
+    skip('a proposed decision does not reach the avoid list', 'no decision was confirmed in this run');
+  } else {
+    record('a proposed decision does not reach the avoid list',
+      !avoidSection.includes(proposedTitle),
+      `“${proposedTitle.slice(0, 50)}” is pending, not rejected`);
+  }
 
   // --- 10. Machine ingestion never triggers a model -------------------------
   heading('10. Phase 5 delivery still never calls a model');

@@ -7,6 +7,7 @@ import { getData } from '@/lib/data';
 import { DELETABLE_ENTITY_TYPES } from '@/lib/domain/types';
 import { toUserFacingError } from '@/lib/errors';
 import { mintToken } from '@/lib/ingestion/token';
+import { normaliseNewlines } from '@/lib/forms';
 
 export interface FormState {
   error: string | null;
@@ -30,6 +31,7 @@ const deleteSchema = z.object({
 });
 
 export async function softDeleteAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  normaliseNewlines(formData);
   const parsed = deleteSchema.safeParse({
     entityType: formData.get('entityType'),
     entityId: formData.get('entityId'),
@@ -59,6 +61,7 @@ export async function softDeleteAction(_prev: FormState, formData: FormData): Pr
 const restoreSchema = z.object({ deletionLogId: z.string().uuid() });
 
 export async function restoreAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  normaliseNewlines(formData);
   const parsed = restoreSchema.safeParse({ deletionLogId: formData.get('deletionLogId') });
   if (!parsed.success) return { error: 'That record could not be identified.' };
 
@@ -102,6 +105,7 @@ export async function createTokenAction(
   _prev: TokenFormState,
   formData: FormData,
 ): Promise<TokenFormState> {
+  normaliseNewlines(formData);
   const parsed = createTokenSchema.safeParse({
     name: formData.get('name'),
     scopeTopicId: formData.get('scopeTopicId') || null,
@@ -150,6 +154,7 @@ export async function revokeTokenAction(
   _prev: TokenFormState,
   formData: FormData,
 ): Promise<TokenFormState> {
+  normaliseNewlines(formData);
   const parsed = revokeTokenSchema.safeParse({ id: formData.get('id') });
   if (!parsed.success) return { error: 'That token could not be identified.' };
 
