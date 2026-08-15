@@ -1092,18 +1092,38 @@ try {
     await a.goto(`${BASE}/inbox/${captureId}`, { waitUntil: 'networkidle' });
     const panelText = await a.innerText('body').catch(() => '');
 
-    // The naming rule. With no model configured nothing may claim AI did this.
-    record('deterministic extraction is not described as AI',
-      /deterministic extraction/i.test(panelText) &&
-        !/\bClaude (read|analysed|analyzed|extracted)/i.test(panelText),
-      'labelled honestly');
-    record('the unconfigured model provider is stated plainly',
-      /AI-assisted extraction is not configured/i.test(panelText), 'said, not hidden');
+    // Which provider a deployment has configured is a deployment's choice, so
+    // this section asserts the naming rule for whichever one is active rather
+    // than assuming the deterministic floor. Written when nothing was
+    // configured, it asserted "not configured" as a fact and started failing
+    // the day a key was added — reporting a correct deployment as broken.
+    const modelConfigured = !/AI-assisted extraction is not configured/i.test(panelText);
+
+    if (modelConfigured) {
+      record('a configured model provider is named as one',
+        /Sends the source below to the configured model provider/i.test(panelText),
+        'stated before sending');
+    } else {
+      record('deterministic extraction is not described as AI',
+        /deterministic extraction/i.test(panelText) &&
+          !/\bClaude (read|analysed|analyzed|extracted)/i.test(panelText),
+        'labelled honestly');
+      record('the unconfigured model provider is stated plainly',
+        /AI-assisted extraction is not configured/i.test(panelText), 'said, not hidden');
+    }
     record('the manual path is still offered',
       /Save to this topic|File it|Extract|topic/i.test(panelText), 'triage form present');
 
     await a.click('button:has-text("Extract suggestions")').catch(() => {});
-    await a.waitForFunction(() => /suggestions? to review/i.test(document.body.innerText), null, { timeout: 40_000 }).catch(() => {});
+    // Waits on markers that appear only once a run exists. An earlier version
+    // matched "failed" anywhere on the page, and the triage form below offers
+    // a "Failed Prompt" type — so it returned before the click had resolved.
+    await a.waitForFunction(
+      () => /Last run:|nothing was written/.test(document.body.innerText),
+      null,
+      { timeout: 300_000 },
+    ).catch(() => {});
+    await a.waitForTimeout(2_000);
 
     const { data: xRunRows } = await admin
       .from('extraction_runs')
@@ -1113,9 +1133,14 @@ try {
     const xRun = (xRunRows ?? [])[0] ?? null;
 
     record('an extraction run is recorded with its provider and prompt version',
-      Boolean(xRun) && xRun.provider === 'deterministic' && xRun.prompt_version === '2',
+      Boolean(xRun) && xRun.provider === (modelConfigured ? 'anthropic' : 'deterministic') &&
+        xRun.prompt_version === '2',
       xRun ? `${xRun.provider} · prompt v${xRun.prompt_version} · ${xRun.status}` : 'no run');
-    record('no model was called', Boolean(xRun) && xRun.model === null, 'model null');
+    // "Which model produced this suggestion" must be answerable from the row,
+    // and must be null exactly when no model was involved.
+    record(modelConfigured ? 'the model that ran is recorded' : 'no model was called',
+      Boolean(xRun) && (modelConfigured ? typeof xRun.model === 'string' && xRun.model.length > 0 : xRun.model === null),
+      modelConfigured ? `model ${xRun?.model}` : 'model null');
 
     const { data: sugg } = await admin
       .from('extraction_suggestions')
