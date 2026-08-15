@@ -83,9 +83,15 @@ const MARK = `provqa${stamp}`;
 const bypassHeaders = BYPASS ? { 'x-vercel-protection-bypass': BYPASS } : {};
 
 const results = [];
+const skipped = [];
 const record = (name, ok, detail = '') => {
   results.push({ name, ok, detail });
   console.log(`  ${ok ? '\x1b[32mPASS\x1b[0m' : '\x1b[31mFAIL\x1b[0m'}  ${name}${detail ? ` — ${detail}` : ''}`);
+};
+/** Named and counted, never silent: a skipped section is not a passing one. */
+const skip = (name, reason) => {
+  skipped.push({ name, reason });
+  console.log(`  \x1b[33mSKIP\x1b[0m  ${name} — ${reason}`);
 };
 const heading = (t) => console.log(`\n\x1b[1m${t}\x1b[0m`);
 
@@ -190,6 +196,32 @@ const SECRET_SOURCE = [
 
 const normalise = (s) => String(s ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
 
+/**
+ * Waits for an analysis to actually finish.
+ *
+ * The predicate has to be exact. The first version of this matched the word
+ * "failed" anywhere on the page — and the triage form below the panel has a
+ * knowledge-type dropdown containing "Failed Prompt", so it returned true
+ * before the button had even been clicked. Every downstream check then read
+ * the database while the request was still in flight and reported "no run
+ * recorded" for a run that was merely still running.
+ *
+ * Two exact markers, and nothing else: "Last run:" appears only once a run
+ * exists (the panel reloads to pick it up), and "nothing was written" is the
+ * error path's own sentence.
+ */
+const settled = (page, timeout = 300_000) =>
+  page
+    .waitForFunction(
+      () => /Last run:|nothing was written/.test(document.body.innerText),
+      null,
+      { timeout },
+    )
+    // A short settle after the marker: the reload that reveals "Last run:"
+    // races the render of the suggestion list underneath it.
+    .then(() => page.waitForTimeout(2_000))
+    .catch(() => {});
+
 const browser = await chromium.launch(launchOptions());
 let exitCode = 0;
 let workspaceId = null;
@@ -252,14 +284,21 @@ try {
 
   // Seed one active decision so the deterministic conflict detector has
   // something real to compare a model's proposal against.
-  await admin.from('decisions').insert({
+  //
+  // The owner id comes from the session, not from `listUsers()`: that call
+  // returns only its first page, and with QA accounts accumulating in the
+  // project the freshly created user was not on it. `user_id` is NOT NULL, so
+  // the insert failed silently and every later count was off by one.
+  const ownerId = (await user.auth.getUser()).data.user?.id ?? null;
+  const { error: seedError } = await admin.from('decisions').insert({
     workspace_id: workspaceId,
     topic_id: topicId,
-    user_id: (await admin.auth.admin.listUsers()).data.users.find((u) => u.email === USER)?.id,
+    user_id: ownerId,
     title: `Ingestion adapters normalise before persisting ${MARK}`,
     decision: 'Every adapter produces NormalizedIngestion and the persister is the only writer.',
     status: 'active',
   });
+  record('the conflict fixture is seeded', !seedError, seedError ? seedError.message : 'one active decision');
 
   // --- 2. The credential gate, before anything leaves the machine -----------
   heading('2. The credential gate runs before the external request');
@@ -305,11 +344,7 @@ try {
     // what proves the gate is a gate and not a wall.
     await page.locator('label:has-text("I have reviewed this") input[type="checkbox"]').check();
     await page.click('button:has-text("Extract suggestions")');
-    await page.waitForFunction(
-      () => /suggestions? to review|Nothing was proposed|failed/i.test(document.body.innerText),
-      null,
-      { timeout: 120_000 },
-    ).catch(() => {});
+    await settled(page);
 
     const { data: ackRuns } = await admin
       .from('extraction_runs').select('id,provider,status').eq('ingestion_record_id', secretItemId);
@@ -344,11 +379,7 @@ try {
 
   const startedAt = Date.now();
   await page.click('button:has-text("Extract suggestions")');
-  await page.waitForFunction(
-    () => /suggestions? to review|Nothing was proposed|failed|could not be reached|returned \d\d\d/i.test(document.body.innerText),
-    null,
-    { timeout: 180_000 },
-  ).catch(() => {});
+  await settled(page);
   const elapsed = Math.round((Date.now() - startedAt) / 1000);
 
   const { data: runRows } = await admin
@@ -462,7 +493,7 @@ try {
   record('the exact configured model identifier is recorded',
     Boolean(run?.model) && (modelOnPage === null || run.model === modelOnPage),
     `model ${run?.model}`);
-  record('the extraction prompt version is recorded', run?.prompt_version === '1', `prompt v${run?.prompt_version}`);
+  record('the extraction prompt version is recorded', run?.prompt_version === '2', `prompt v${run?.prompt_version}`);
   record('a real input token count is recorded', Number(run?.input_tokens) > 0, `${run?.input_tokens} in`);
   record('a real output token count is recorded', Number(run?.output_tokens) > 0, `${run?.output_tokens} out`);
   record('no monetary cost is invented', run?.cost_usd === null, `cost_usd ${run?.cost_usd}`);
@@ -599,10 +630,13 @@ try {
   // One active decision existed before any of this — the conflict fixture.
   // Everything the review filed must be proposed.
   const activeDecisions = (filedDecisions ?? []).filter((d) => d.status === 'active');
+  const proposedDecisions = (filedDecisions ?? []).filter((d) => d.status === 'proposed');
   record('a confirmed decision is filed proposed, never active',
-    activeDecisions.length === 1 && activeDecisions[0].title.includes(MARK) &&
-      (filedDecisions ?? []).filter((d) => d.status === 'proposed').length > 0,
-    `${(filedDecisions ?? []).filter((d) => d.status === 'proposed').length} proposed, 1 pre-existing active`);
+    activeDecisions.length === 1 && activeDecisions[0].title.includes(MARK) && proposedDecisions.length > 0,
+    // Counted, not asserted in prose: the first version of this line said
+    // "1 pre-existing active" as literal text, so a run where the fixture had
+    // silently failed to insert still printed a reassuring detail.
+    `${proposedDecisions.length} proposed, ${activeDecisions.length} active`);
 
   // The edited suggestion has to be findable, under its edited title, in
   // whichever table its kind files into.
@@ -672,8 +706,21 @@ try {
 
   const { data: rawAfter } = await admin
     .from('ingestion_records').select('raw_content').eq('id', itemId).single();
+  const storedRaw = String(rawAfter?.raw_content ?? '');
+  // Reporting the difference rather than the verdict: a bare "byte-for-byte"
+  // on a failing comparison says the check ran and nothing about what moved.
+  const firstDivergence = (() => {
+    if (storedRaw === QA_SOURCE) return null;
+    const n = Math.min(storedRaw.length, QA_SOURCE.length);
+    for (let i = 0; i < n; i += 1) {
+      if (storedRaw[i] !== QA_SOURCE[i]) {
+        return `at offset ${i}: stored ${JSON.stringify(storedRaw.slice(i, i + 20))} vs sent ${JSON.stringify(QA_SOURCE.slice(i, i + 20))}`;
+      }
+    }
+    return `length ${storedRaw.length} stored vs ${QA_SOURCE.length} sent; tail ${JSON.stringify((storedRaw.length > QA_SOURCE.length ? storedRaw : QA_SOURCE).slice(n))}`;
+  })();
   record('the raw source is never altered by any of this',
-    String(rawAfter?.raw_content) === QA_SOURCE, 'stored byte-for-byte');
+    firstDivergence === null, firstDivergence ?? 'stored byte-for-byte');
 
   // --- 9. Resume reflects only confirmed information ------------------------
   heading('9. Resume');
@@ -689,14 +736,17 @@ try {
   record('a resume generates for the topic after a model-assisted review',
     resume.includes('ContextShelf Resume Context'), `${resume.length} characters`);
 
-  const confirmedTitles = [
+  // Only the record kinds Resume is specified to carry. A suggested idea is
+  // deliberately absent from a Resume, so counting ideas here would fail the
+  // check for a product behaviour that is correct.
+  const carriable = [
     ...(filedEntries ?? []).map((e) => e.title),
-    ...(filedDecisions ?? []).map((d) => d.title),
-    ...(filedIdeas ?? []).map((i) => i.title),
+    ...(filedDecisions ?? []).filter((d) => d.status === 'proposed').map((d) => d.title),
   ].filter(Boolean);
-  const carried = confirmedTitles.filter((t) => resume.includes(t));
+  const carried = carriable.filter((t) => resume.includes(t));
   record('Resume carries confirmed records',
-    carried.length > 0, `${carried.length} of ${confirmedTitles.length} confirmed titles present`);
+    carriable.length > 0 && carried.length > 0,
+    `${carried.length} of ${carriable.length} confirmed entries and proposed decisions present`);
 
   record('Resume never carries a suggestion nobody confirmed',
     !resume.includes(`Proposed current state ${MARK}`),
@@ -709,6 +759,20 @@ try {
 
   // --- 10. Machine ingestion never triggers a model -------------------------
   heading('10. Phase 5 delivery still never calls a model');
+
+  // The endpoint runs as `service_role`, so it needs SUPABASE_SECRET_KEY in
+  // the server environment. That variable is scoped to production only, which
+  // is why a preview answers 503 here — a correct refusal, not a defect. It is
+  // reported as a skip with its reason rather than passed over, because a
+  // section that quietly covered nothing would read as a section that passed.
+  const ingestReady = await fetch(`${BASE}/api/ingest`, { headers: bypassHeaders })
+    .then((r) => r.status !== 503)
+    .catch(() => false);
+
+  if (!ingestReady) {
+    skip('machine ingestion is not configured in this deployment',
+      'SUPABASE_SECRET_KEY is production-scoped; this section must run against production');
+  } else {
 
   await page.goto(`${BASE}/settings`, { waitUntil: 'networkidle' });
   await page.fill('input[name="name"]', `Provider QA ${stamp}`);
@@ -748,6 +812,8 @@ try {
   record('the response to a machine names no provider and no credential',
     !/anthropic|sk-ant-|api[_-]?key/i.test(JSON.stringify(deliveredBody)),
     'receipt is transport only');
+
+  }
 
   // --- 11. Credentials do not leak -----------------------------------------
   heading('11. Credential containment');
@@ -821,6 +887,10 @@ try {
 
 const failed = results.filter((r) => !r.ok);
 console.log(`\n\x1b[1m${results.length - failed.length}/${results.length} checks passed\x1b[0m`);
+if (skipped.length > 0) {
+  console.log(`\n\x1b[33m${skipped.length} skipped\x1b[0m — these are NOT passes:`);
+  for (const s of skipped) console.log(`  - ${s.name} (${s.reason})`);
+}
 if (failed.length > 0) {
   console.log('\nFailed:');
   for (const f of failed) console.log(`  - ${f.name}${f.detail ? ` (${f.detail})` : ''}`);

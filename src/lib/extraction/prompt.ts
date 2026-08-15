@@ -18,8 +18,10 @@
 
 import type { ExistingContext, ExtractionRequest } from './types';
 
+import { KNOWLEDGE_TYPES } from '@/lib/domain/types';
+
 /** Bump whenever the wording changes in a way that could change output. */
-export const EXTRACTION_PROMPT_VERSION = '1';
+export const EXTRACTION_PROMPT_VERSION = '2';
 
 export const EXTRACTION_SYSTEM_PROMPT = `You extract structured records from a source document for ContextShelf, a permanent memory system.
 
@@ -36,6 +38,8 @@ The distinction that matters most:
   "Approved. Proceed with X." -> a decision
 
 A recommendation is NEVER a decision, however confident it sounds. When you propose a decision, quote the words that make it one in "basis".
+
+The reverse failure is just as bad, and easier to miss. When the source DOES state a decision plainly — an approval, a settled direction, "we are doing X" — propose it. Silently downgrading a stated decision to an idea loses the one thing the person wrote the sentence to record. The rule is that you never *invent* a decision, not that you avoid decisions.
 
 Never:
   - infer that an unmentioned task was completed
@@ -69,6 +73,14 @@ Return ONLY JSON matching this shape:
   ],
   "warnings": ["anything you noticed but did not record"]
 }
+
+"knowledgeType" is required when kind is knowledge_entry, and must be exactly one of:
+
+${KNOWLEDGE_TYPES.join(', ')}
+
+There are no others. A record carrying any other value is discarded, so a bug filed as "defect" or "technical_detail" is a bug the person never sees. If nothing in that list fits, use "important_context" rather than inventing a name.
+
+Reach for knowledge_entry often: a defect described in the source is "bug", the correction of one is "fix" — and they are two records, not one. Work reported as done is "implementation" or "progress"; a constraint the project must respect is "requirement".
 
 Rules per kind:
   - decision: propose only for an explicit decision. It will be recorded as PROPOSED and will not be active until a person approves it.
