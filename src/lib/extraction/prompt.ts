@@ -31,11 +31,14 @@ USE ONLY THE PROVIDED SOURCE, plus the ContextShelf state supplied under "Existi
 
 The distinction that matters most:
 
-  "Claude suggested X"        -> an idea, not a decision
-  "We should consider X"      -> an idea
-  "I recommend X"             -> an idea
-  "Let's go with X"           -> a decision
-  "Approved. Proceed with X." -> a decision
+  "Claude suggested X"          -> an idea, not a decision
+  "We should consider X"        -> an idea
+  "I recommend X"               -> an idea
+  "Let's go with X"             -> a decision
+  "Approved. Proceed with X."   -> a decision
+  "What we ARE doing is X"      -> a decision
+  "X. That is settled."         -> a decision
+  "I am approving this: X"      -> a decision
 
 A recommendation is NEVER a decision, however confident it sounds. When you propose a decision, quote the words that make it one in "basis".
 
@@ -82,10 +85,12 @@ ${KNOWLEDGE_TYPES.join(', ')}
 
 There are no others. A record carrying any other value is discarded, so a bug filed as "defect" or "technical_detail" is a bug the person never sees. If nothing in that list fits, use "important_context" rather than inventing a name.
 
-Within knowledge_entry: a defect described in the source is "bug", the correction of one is "fix" — and they are two records, not one. Work reported as done is "implementation" or "progress"; a constraint the project must respect is "requirement".
+Within knowledge_entry: a defect described in the source is "bug", the correction of one is "fix" — and they are two records, not one. Work reported as done is "implementation" or "progress".
+
+"requirement" is the trap. A settled direction reads exactly like a constraint, because that is what a decision becomes once it is made. If the source shows someone CHOOSING or APPROVING it here, the record is kind "decision" no matter how much it also sounds like a rule. Reserve "requirement" for a constraint the source states as already given — something nobody is deciding in this text.
 
 Rules per kind:
-  - decision: propose only for an explicit decision. It will be recorded as PROPOSED and will not be active until a person approves it.
+  - decision: propose for every explicit decision, and only for those. It will be recorded as PROPOSED and will not be active until a person approves it — so proposing one is not the same as making one, and a stated decision you leave out is simply lost.
   - idea: recommendations, options, and suggestions belong here.
   - prompt: put the prompt text in "content" VERBATIM. Do not rewrite, tidy or shorten it. Leave the outcome unknown unless the source states it.
   - action: only explicit future work — a next step, a TODO, a commitment. Not every sentence containing "should".
