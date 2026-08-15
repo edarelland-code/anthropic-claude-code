@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { runExtraction } from './service';
 import { caseWithSecrets } from './fixtures';
+import { anthropicProvider, providerStatuses } from './providers';
 import type { ExtractionProvider, ExtractionResult } from './types';
 
 /**
@@ -76,6 +77,70 @@ describe('the credential gate stands in front of any provider that sends', () =>
     };
     const outcome = await runExtraction({ ...base, source: 'anything', provider: unconfigured });
     expect(outcome.failureCode).toBe('not_configured');
+  });
+});
+
+/**
+ * What Settings says about the provider, at each of the three states it can be
+ * in. Both of these were found by connecting a real key rather than by reading
+ * the code, which is why they are pinned here now.
+ */
+describe('the provider reports its own state truthfully', () => {
+  const KEY = 'ANTHROPIC_API_KEY';
+  const MODEL = 'CONTEXTSHELF_EXTRACTION_MODEL';
+  const set = (k: string, v: string | undefined) => {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  };
+  const original = { key: process.env[KEY], model: process.env[MODEL] };
+  afterEach(() => {
+    set(KEY, original.key);
+    set(MODEL, original.model);
+  });
+
+  it('reports no problem at all once both variables are present', () => {
+    set(KEY, 'sk-ant-test-not-a-real-key');
+    set(MODEL, 'claude-test-model');
+    expect(anthropicProvider.isConfigured()).toBe(true);
+    // The chain used to fall through to the model message whenever a key
+    // existed, so a fully configured deployment claimed the model identifier
+    // was unset on the same row that displayed it.
+    expect(anthropicProvider.configurationProblem()).toBeNull();
+    expect(anthropicProvider.model).toBe('claude-test-model');
+  });
+
+  it('names the missing variable, and only the missing one', () => {
+    set(KEY, 'sk-ant-test-not-a-real-key');
+    set(MODEL, undefined);
+    expect(anthropicProvider.configurationProblem()).toMatch(/CONTEXTSHELF_EXTRACTION_MODEL is not set/);
+
+    set(KEY, undefined);
+    set(MODEL, 'claude-test-model');
+    expect(anthropicProvider.configurationProblem()).toMatch(/ANTHROPIC_API_KEY is not set/);
+
+    set(MODEL, undefined);
+    expect(anthropicProvider.configurationProblem()).toMatch(/ANTHROPIC_API_KEY and CONTEXTSHELF_EXTRACTION_MODEL/);
+  });
+
+  it('marks exactly one provider active, and it is the one a run would use', () => {
+    set(KEY, undefined);
+    set(MODEL, undefined);
+    const unconfigured = providerStatuses();
+    expect(unconfigured.filter((p) => p.active).map((p) => p.id)).toEqual(['deterministic']);
+
+    set(KEY, 'sk-ant-test-not-a-real-key');
+    set(MODEL, 'claude-test-model');
+    const configured = providerStatuses();
+    // The built-in provider is always configured, so "the first configured
+    // one" named it active while every run went to the model instead.
+    expect(configured.filter((p) => p.active).map((p) => p.id)).toEqual(['anthropic']);
+    expect(configured.find((p) => p.id === 'deterministic')?.configured).toBe(true);
+  });
+
+  it('never reports a key in any status it exposes', () => {
+    set(KEY, 'sk-ant-test-not-a-real-key');
+    set(MODEL, 'claude-test-model');
+    expect(JSON.stringify(providerStatuses())).not.toContain('sk-ant-');
   });
 });
 

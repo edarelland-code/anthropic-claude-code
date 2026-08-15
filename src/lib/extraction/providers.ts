@@ -175,6 +175,11 @@ export const anthropicProvider: ExtractionProvider = {
   configurationProblem: () => {
     const key = anthropicKey();
     const model = anthropicModel();
+    // Configured is a real answer and has to be said first. Without this the
+    // chain fell through to the model message whenever a key was present, so a
+    // fully configured deployment reported "CONTEXTSHELF_EXTRACTION_MODEL is
+    // not set" on the same line as the model identifier it had just rendered.
+    if (key && model) return null;
     if (!key && !model) {
       return 'ANTHROPIC_API_KEY and CONTEXTSHELF_EXTRACTION_MODEL are not set. Both live in the server environment; built-in extraction works without either.';
     }
@@ -307,17 +312,29 @@ export interface ProviderStatus {
   label: string;
   model: string | null;
   configured: boolean;
+  /** True for the one provider a run would actually use right now. */
+  active: boolean;
   problem: string | null;
   sendsContentExternally: boolean;
 }
 
-/** What Settings renders. Never includes a key, configured or not. */
+/**
+ * What Settings renders. Never includes a key, configured or not.
+ *
+ * `active` is computed from `defaultProvider()` rather than re-derived by the
+ * screen. Settings previously called the first *configured* provider active,
+ * and the deterministic one is always configured — so with a model connected
+ * the page said built-in extraction was active while every run went to the
+ * model. The rule for which provider runs lives in one place.
+ */
 export function providerStatuses(): ProviderStatus[] {
+  const activeId = defaultProvider().id;
   return PROVIDERS.map((p) => ({
     id: p.id,
     label: p.label,
     model: p.model,
     configured: p.isConfigured(),
+    active: p.id === activeId,
     problem: p.configurationProblem(),
     sendsContentExternally: p.sendsContentExternally,
   }));
