@@ -289,13 +289,21 @@ try {
   // returns only its first page, and with QA accounts accumulating in the
   // project the freshly created user was not on it. `user_id` is NOT NULL, so
   // the insert failed silently and every later count was off by one.
+  // Deliberately about something the QA source never mentions.
+  //
+  // The first fixture restated the approved direction planted in the source,
+  // and the provider is shown active decisions so it can recognise duplicates.
+  // It read one, saw the project already held that decision, and correctly
+  // declined to propose it again — so the check for "the approval is suggested
+  // as a decision" failed on a fixture that had suppressed the very thing it
+  // was checking for. Unseeded, the same source yields it at 0.98 confidence.
   const ownerId = (await user.auth.getUser()).data.user?.id ?? null;
   const { error: seedError } = await admin.from('decisions').insert({
     workspace_id: workspaceId,
     topic_id: topicId,
     user_id: ownerId,
-    title: `Ingestion adapters normalise before persisting ${MARK}`,
-    decision: 'Every adapter produces NormalizedIngestion and the persister is the only writer.',
+    title: `Search ranking uses ts_rank_cd with fixed state multipliers ${MARK}`,
+    decision: 'Ranking is deterministic with a total-order tiebreak so paging cannot drop or repeat a row.',
     status: 'active',
   });
   record('the conflict fixture is seeded', !seedError, seedError ? seedError.message : 'one active decision');
