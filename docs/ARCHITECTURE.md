@@ -447,8 +447,8 @@ interface NormalizedSegment {
 
 **Stage 4 — Classify.** Suggests topic/subtopic/type. **Suggestions are never auto-applied above
 the confidence threshold without a review step in v1** — misfiling silently is worse than an
-inbox item. Phases: Phase 3 = deterministic (keyword/slug/recency); Phase 6 = model-assisted, with
-the same confirm gate.
+inbox item. Phases: Phase 3 = deterministic (keyword/slug/recency); Phase 6 = model-assisted, through
+the same confirm gate. Both shipped; the gate is identical either way.
 
 **Stage 5 — Dedupe/conflict** runs *before* commit and can only *propose*: similar topic,
 duplicate entry, duplicate prompt body, conflicting decision, newer-decision-supersedes. Per the
@@ -458,8 +458,9 @@ Phase 3 built the deterministic half: a generated `content_fingerprint` for exac
 similarity for near ones, `external_url` and `commit_sha` for a re-imported source, and title
 similarity for two active decisions that may contradict each other. `ProposalRepository` has no
 method that can merge, link or supersede — acting on a proposal is a separate call the user
-triggers, so a silent auto-merge is not expressible. Phase 6 may improve the matching; it does not
-get to remove the confirmation.
+triggers, so a silent auto-merge is not expressible. Phase 6 did not change it: duplicate and conflict
+findings still come from this fingerprint and never from the provider, because a model's opinion
+about whether it has seen a decision before is a guess about a database it cannot see.
 
 **Transport surfaces:**
 - `POST /api/ingest` — JSON, bearer token from `ingestion_tokens`, scoped to a workspace. The
@@ -596,7 +597,7 @@ files exist.
 | **3 · Capture & retrieval** | Inbox, Quick Capture, full-text search + filters, file/URL references, JSON + transcript import | ✅ **Both criteria met, on the hosted deployment.** A pasted transcript produced 2 entries, each anchored back into the stored original; searching a word that appears only inside a transcript body returns it. Quick Capture requires content and nothing else |
 | **4 · Continuation** | Resume in Claude, 3 densities, 3 targets, Resume Triggers, snapshots | ✅ **Both criteria met, on the hosted deployment.** A topic Resume renders objective, current state, next action, active decisions and requirements with no manual context added, and carries the avoid-list with the reason each direction was dropped. Assembly is a pure function of authoritative records — no snapshot is ever read back in, and no model API is called |
 | **5 · Claude Code integration** | `/api/ingest`, tokens, git metadata model, hook scripts, MCP pathway | ✅ **Met, on the hosted deployment.** A real commit reaches ContextShelf through `npm run contextshelf:sync` with one command and no manual filing: the Layer 1 session, the entries, the file references, the completed action and the new next action all appear, and the next Resume names the new action rather than the finished one. Delivery is not authority — a proposed decision arrives `proposed` and stays out of the active list and off the avoid list. The MCP pathway is not built |
-| **6 · Assisted ingestion** | Extraction suggestions, persistent bulk review, user correction, batch confirmation, duplicate & conflict surfacing | ✅ **Core met, on the hosted deployment.** A pasted conversation is captured, extracted into typed suggestions with line anchors, reviewed and edited, and confirmed in one transaction — decisions land `proposed`, ideas `suggested`, prompts `untested`, and Current State is refused by the batch. Duplicate detection proposes and never applies. **The Anthropic provider is code-ready and not connected**; deterministic extraction is never described as AI anywhere in the product |
+| **6 · Assisted ingestion** | Extraction suggestions, persistent bulk review, user correction, batch confirmation, duplicate & conflict surfacing, model-assisted extraction | ✅ **Met, on the hosted deployment, with the model provider connected.** A pasted conversation is captured, extracted into typed suggestions with line anchors, reviewed and edited, and confirmed in one transaction — decisions land `proposed`, ideas `suggested`, prompts `untested`, and Current State is refused by the batch. Duplicate detection proposes and never applies. The Anthropic provider is live on **`claude-sonnet-5`** and validated by one real request per run against production (`npm run validate:provider`, 69/69): a source carrying an unapproved recommendation, an explicit approval, an idea, a verbatim prompt, a bug, a fix, a next action and a genuinely ambiguous paragraph is sorted correctly, the approval lands `proposed`, and the recommendation beside it stays an idea. **Deterministic extraction remains the floor** — with no key the product falls back to it, attempts no external call and stays usable, asserted in the unit suite rather than left to hold by accident. Each screen names whichever provider actually ran |
 
 Cross-cutting from Phase 1 onward: export/import, soft-delete + recovery, mobile parity, tests.
 
@@ -629,6 +630,15 @@ Auto-splitting a transcript into typed entries is genuinely hard, and wrong entr
 memory that Resume depends on.
 *Mitigation:* confidence scores, human review gate before filing, raw transcript always retained
 so any bad extraction is correctable rather than lossy.
+*What connecting a model actually showed (Phase 6):* the failure mode is not hallucination, it is
+**silent omission**. The extraction instruction had been written entirely against a model inventing
+a decision, and the model duly invented none — but it also filed no bugs and no fixes, because
+nothing told it those categories existed, and it quietly downgraded an explicit approval to a
+requirement, because a settled direction reads exactly like a constraint. A record that is never
+proposed is invisible in a review; the reviewer sees a short list and no sign anything is missing.
+Enumerating the vocabulary and naming the reverse failure fixed both. `temperature` is refused by
+current models, so two analyses of one source can differ — which is another reason the review, not
+the extraction, is what the guarantees rest on.
 
 **R5 — Context snapshot drift.**
 A stale Master Memory is worse than none, because it is trusted.

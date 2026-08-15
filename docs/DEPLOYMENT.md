@@ -501,9 +501,20 @@ CONTEXTSHELF_EXTRACTION_MODEL=…   the model identifier to use
 ```
 
 **There is no default model, deliberately.** A default in code would assert that some particular
-model had been chosen and validated for this task; none has been. With the key set and the model
-unset, the provider stays `Not configured` and says which piece is missing. Choose a current Claude
-model identifier from Anthropic's own published model list when you configure it.
+model had been chosen and validated for this task. With the key set and the model unset, the
+provider stays `Not configured` and says which piece is missing.
+
+**The validated model is `claude-sonnet-5`.** It is what this deployment is configured with and
+what the live provider validation (`npm run validate:provider`) was run against, end to end.
+Any other current Claude model identifier from Anthropic's published list should work; only this
+one has been exercised. Record the identifier here when you change it — "which model produced this
+suggestion" is an audit question, and every extraction run stores its answer in `extraction_runs.model`.
+
+**Scope both variables to the environments that need them.** `ANTHROPIC_API_KEY` and
+`CONTEXTSHELF_EXTRACTION_MODEL` are set for Preview and Production. `SUPABASE_SECRET_KEY` is
+Production only, which is why `/api/ingest` answers `503 SUPABASE_SECRET_KEY is not set` on a
+preview deployment — the endpoint runs as `service_role` and correctly refuses rather than
+proceeding without it.
 
 **There is no place in the app to paste the key**, and that is also deliberate. Storing a key per
 user would mean encrypting it at rest, which would mean a key-management dependency this deployment

@@ -72,6 +72,12 @@ These are permanent. Changing one requires the process at the bottom of this fil
     Layer 2 `knowledge_entries` = typed, statused, queryable knowledge. Layer 2 keeps
     `source_session_id` + `source_reference`.
 11. **Never invent provenance.** If a source is unknown, `source_type = 'manual'`.
+11a. **Stored text is the text that was typed.** HTML form submission rewrites line breaks to CRLF,
+    so every textarea in the product was storing bytes nobody entered — which quietly falsifies both
+    "Layer 1 is verbatim evidence" and "a prompt body survives byte-for-byte", the second of them
+    only discovered when someone pastes that prompt into a terminal. `normaliseNewlines()` runs
+    first in every form action. Undoing a transport artefact is not editing content; a lone `\r` is
+    content and is left alone.
 
 ### Data and sync
 12. **The cloud database is the only source of truth.** `localStorage` may hold UI preferences
@@ -98,12 +104,16 @@ These are permanent. Changing one requires the process at the bottom of this fil
     has its own compare-and-accept flow. Nothing about a suggestion's confidence may pre-select an
     authority-changing kind, and a suggestion that duplicates or conflicts with an existing record
     is never pre-selected either.
-17d. **Never call deterministic extraction AI.** When no model provider is configured, every
-    user-facing string says what actually ran — "Extract suggestions", "deterministic extraction",
-    "it does not understand the conversation". A reviewer who believes a model read their
-    conversation reviews far less carefully than one who knows a matcher scanned it, and the review
-    is the only thing between a suggestion and the project's memory. A provider credential lives in
-    the server environment and never in a table, a client bundle, git, this file, or a log.
+17d. **Every user-facing string names whichever provider actually ran.** Deterministic extraction is
+    never called AI — "Extract suggestions", "deterministic extraction", "it does not understand the
+    conversation" — and a model is never described as deterministic. A reviewer who believes a model
+    read their conversation reviews far less carefully than one who knows a matcher scanned it, and
+    the review is the only thing between a suggestion and the project's memory. The rule cuts both
+    ways, and the second direction is the one that rots: Settings once reported a configured
+    variable as unset and called the built-in provider Active while every run went to the model, so
+    "which provider is active" is derived from `defaultProvider()` in one place rather than
+    re-decided per screen. A provider credential lives in the server environment and never in a
+    table, a client bundle, git, this file, or a log.
 17a. **Never surface a raw driver error.** Everything thrown by the data layer goes through
     `toUserFacingError()`; the detail is logged server-side, the user gets an actionable
     sentence. Never fail silently either — every failure path renders something.
@@ -161,6 +171,8 @@ These are permanent. Changing one requires the process at the bottom of this fil
 | AD-21 | **The ingestion endpoint's workspace comes from the token row, and its boundary is an explicit check rather than RLS** | A delivery carries no Supabase session, so there is nothing for a policy to read — the endpoint runs as `service_role`, which bypasses RLS by design. The first design dropped to `authenticated` inside a `SECURITY DEFINER` function so the ordinary policies would apply; PostgreSQL forbids `SET ROLE` there, and a version that silently failed to switch would have looked identical while enforcing nothing. So `ingest_from_token()` is `SECURITY INVOKER`, `EXECUTE` is granted to `service_role` alone, every topic and subtopic lookup is scoped to the token's workspace, and a topic in another workspace is answered exactly as one that does not exist. Because the boundary is code rather than policy, it is asserted in `supabase/tests/08_ingest.test.sql` rather than assumed |
 | AD-22 | **Idempotency and duplicate detection are different mechanisms and must never be merged** | Idempotency compares a key the CLIENT chose: the same token and key replay the original receipt and write nothing, and the same key with different content is refused rather than answered with the wrong receipt — enforced by a unique index on `(token_id, idempotency_key)`, not by the endpoint remembering to check. Duplicate detection compares CONTENT and proposes a merge to a person (rule 17). Collapsing them would either make a retry create a duplicate, or make the system silently decide that two genuinely separate deliveries were one |
 | AD-23 | **Model assistance is a provider behind a port, and the review is rows** | `ExtractionProvider` names no vendor and omits — rather than merely discourages — every power a provider must not have: it cannot decide duplicates, resolve conflicts, write records or choose what is authoritative. Duplicate and conflict findings come from the Phase 3 fingerprint, because a provider's opinion about whether it has seen a decision before is a guess about a database it cannot see. Suggestions persist in `extraction_suggestions` rather than in component state, because half an hour of review must survive a closed tab, and the row keeps both the current value and the provider's `original` so an edit stays legible as an edit. The deterministic provider needs no credential and sends nothing anywhere, which is what makes every one of these guarantees true whether or not a model is ever configured |
+| AD-24 | **A provider contract is verified by making the request, never by reading the client** | Connecting Anthropic found six defects in code that had been reviewed repeatedly and looked correct: `temperature` refused outright, reasoning and answer sharing one `max_tokens` so truncated JSON surfaced as a parse error, a 401 reported as a bare status code, Settings claiming a configured variable was unset, an extraction instruction that never listed the knowledge types it wanted back, and — found only by comparing stored bytes against typed bytes — every textarea in the product storing CRLF. None was visible from the source. So the gate for a provider is `npm run validate:provider`: one real request through the deployed application per run, asserted in the database. It is deliberately a separate script from `validate:hosted`, which must keep passing with no key configured at all — the deterministic floor is the product's honest baseline, and putting live-provider checks there would make a paid dependency mandatory for validation |
+| AD-25 | **A validator that cannot fail for the right reason is worse than no validator** | Four checks in this phase reported product problems that did not exist: a wait predicate matching "failed" anywhere on the page, where the triage form offers a *Failed Prompt* type, so it returned before the request ran; a conflict fixture restating the decision under test, so the provider correctly declined to propose a duplicate and the check for that decision failed; a query selecting `supersedes_reason`, a column that does not exist, so three checks read an empty list as an empty database; and a 20-second `networkidle` navigation reporting a layout failure for a page it never loaded. Hence: assertions name exact markers rather than substrings that appear elsewhere, fixtures must not overlap what they sit beside, a failing detail string is computed rather than asserted in prose, and a section that cannot run reports SKIP with its reason and is counted apart from passes |
 | AD-18 | **Judgements about a record are appended, never written onto it** | Prompt outcomes and winning-version selections each live in their own append-only table, ordered by an identity sequence — not by `created_at`, which is fixed for a whole transaction and silently degrades to comparing random uuids. Re-rating appends, so a changed judgement is history rather than an overwrite, exactly as superseding is for decisions. The seeding rule keeps this from becoming two sources of truth: a row is written whenever the parent is created, so the newest row is always the answer with no fallback |
 
 ---
@@ -207,6 +219,7 @@ npm run provision            # the whole hosted sequence: link, migrate, verify,
 npm run schema:parity        # hosted vs repository catalogs, without a Postgres connection
 npm run verify:hosted        # the two hosted SQL suites over the Management API (AD-15)
 npm run validate:hosted -- <url>   # auth, persistence, isolation, provenance, ingestion, authenticated QA
+npm run validate:provider -- <url> # ONE live model request end to end, asserted in the database (AD-24)
 
 npm run contextshelf:sync          # send this Claude Code session to ContextShelf
 npm run contextshelf:sync -- --check   # verify the token and what it points at

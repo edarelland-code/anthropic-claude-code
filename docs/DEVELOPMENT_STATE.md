@@ -4,13 +4,19 @@
 > (CLAUDE.md working rules). Permanent rules live in `/CLAUDE.md`; reasoning lives in
 > `docs/ARCHITECTURE.md`; setup and deployment live in `docs/DEPLOYMENT.md`.
 
-**Last updated:** 2026-08-14
-**Current phase:** Phase 6 — Assisted ingestion. **Core complete; AI provider pending
-configuration.** The whole source → suggestions → persistent review → correction → confirmation →
-authoritative records workflow is built, hosted-validated and usable. The Anthropic provider is
-written against the same interface, reports itself unconfigured, and makes no external call.
+**Last updated:** 2026-08-15
+**Current phase:** Phase 6 — Assisted ingestion. **Complete.** The whole source → suggestions →
+persistent review → correction → confirmation → authoritative records workflow is built,
+hosted-validated and usable, and the model provider is connected and validated against live
+requests. The validated model is **`claude-sonnet-5`**, configured as `CONTEXTSHELF_EXTRACTION_MODEL`
+in the server environment.
 
-Phases 1–5 are closed and merged.
+**Deterministic extraction remains the floor.** Nothing about connecting a provider made one
+mandatory: with `ANTHROPIC_API_KEY` unset the product falls back to deterministic extraction,
+attempts no external call, and stays fully usable. That is asserted in
+`src/lib/extraction/readiness.test.ts` rather than left to hold by accident.
+
+Phases 1–6 are closed and merged.
 
 Live at **<https://contextshelf.vercel.app>**, backed by Supabase `omhktzxwffaipmcoljic`, carrying
 migrations `0001`–`0007` — **29 tables**, 4 views, 38 policies. Phase 6 added two tables
@@ -37,8 +43,9 @@ These terms mean exactly this and nothing more:
 
 ## Phase 6 — Assisted ingestion
 
-**Status: Core complete; AI provider pending configuration.** Those are two separable layers and
-the distinction is load-bearing — see "What is and is not operational" below.
+**Status: Complete.** The workflow and the model provider are two separable layers and the
+distinction stays load-bearing — see "What is and is not operational" below. The provider is now
+connected and validated live; the workflow does not depend on it.
 
 ### The rule
 
@@ -64,14 +71,15 @@ Raw source (unchanged, in the Inbox)
 | Layer | Status |
 |---|---|
 | **Phase 6 Core** — the workflow above, with deterministic extraction | ✅ Complete, hosted-validated |
-| **Phase 6 AI Enhancement** — Anthropic-backed semantic extraction | ⏸ Code-ready, **not connected**. No key, no external call, and the UI says so |
+| **Phase 6 AI Enhancement** — Anthropic-backed semantic extraction | ✅ Complete. Connected, live-validated on `claude-sonnet-5`, 69/69 checks against production |
 
-**Nothing in the product describes deterministic extraction as AI.** The button says *Extract
-suggestions*, the panel says *deterministic extraction — it does not understand the conversation*,
-and Settings lists "Deterministic extraction" and "AI-assisted extraction" as two separate rows
-with the second marked *Not configured*. This is not modesty. A reviewer who believes a model read
-their conversation reviews far less carefully than one who knows a matcher scanned it, and the
-review is the only thing between a suggestion and the project's memory.
+**Nothing in the product describes deterministic extraction as AI, and nothing describes a model
+as deterministic.** Each screen names whichever provider is actually configured: with no key the
+panel says *deterministic extraction — it does not understand the conversation*, and with one it
+says the source is sent to the configured model provider. Settings lists both rows and marks
+exactly one **Active** — the one a run would really use. This is not modesty. A reviewer who
+believes a model read their conversation reviews far less carefully than one who knows a matcher
+scanned it, and the review is the only thing between a suggestion and the project's memory.
 
 ### What deterministic extraction can and cannot identify
 
@@ -97,32 +105,67 @@ State" would be the system pretending to understand.
 | 57 | Medium | `prompts` has no `source_session_id` column, so confirming a prompt suggestion raised | Provenance in `metadata`, with the source anchor on the version |
 | 58 | Low | The validator's Phase 6 section renamed an identifier inside a result string | Renamed properly; the check now reads as written |
 
+### Issues found by connecting the provider
+
+Every one of these was found by making a real request. None was visible from reading the code, and
+several had been read past repeatedly.
+
+| # | Severity | Issue | Fix |
+|---|---|---|---|
+| 59 | **High — every textarea stored line breaks nobody typed** | HTML form submission normalises line breaks to CRLF. A user types `\n`, the browser sends `\r\n`, and the stored bytes are not what was written. It falsifies two of the product's own claims: Layer 1 is verbatim evidence, and a prompt body survives byte-for-byte — the latter discovered the moment such a prompt is pasted into a terminal | `normaliseNewlines()` runs first in all 24 form actions. A lone `\r` is left alone and repeated fields keep every value in order (`src/lib/forms.test.ts`) |
+| 60 | **High — the request was built against a model contract that had changed** | `temperature` is refused outright by current models, so the run 400'd. It had been set to zero for reproducibility, which it never delivered on any model | Removed, along with the comment claiming it |
+| 61 | **High — a truncated answer was reported as malformed output** | Reasoning and answer share `max_tokens` on current models. A budget sized for the answer alone returned JSON cut off mid-record, which surfaced as "the model did not return JSON" — a parse error standing in for a budget error | Raised to 16k; truncation and refusal are each named as themselves before the JSON parse |
+| 62 | **Medium — a rejected key reported only its status code** | `"The model provider returned 401."` sends a reader checking their model, their network and their payload before the one thing it can be | 401/403 name the key as the cause and carry the provider's own explanation into `failure_detail` |
+| 63 | **Medium — Settings contradicted itself and named the wrong active provider** | `configurationProblem()` had no configured branch, so a fully configured deployment rendered "CONTEXTSHELF_EXTRACTION_MODEL is not set" on the same row as the model identifier. Separately, Settings called the first *configured* provider Active — and the built-in one always is — so with a model connected the page said built-in extraction was active while every run went to the model | A configured provider reports no problem; `active` is computed from `defaultProvider()` so the rule lives in one place |
+| 64 | **Medium — the extraction instruction never named the knowledge types it wanted back** | The model returned a record typed `technical_detail`, correctly discarded, and filed no bug and no fix at all — nothing told it those categories existed. The instruction also addressed only one failure, a model inventing a decision, and said nothing about the opposite one: silently downgrading a stated decision to an idea | All 24 types enumerated, with kind chosen before knowledge type and the four overlapping names called out. Prompt version 2 |
+
+Four validator defects were also found and fixed, each of which had reported a product problem
+that was not there: a wait predicate matching the word "failed" in the triage form's *Failed
+Prompt* option and returning before the request had run; a conflict fixture that restated the very
+decision under test, so the provider correctly declined to propose a duplicate; a decisions query
+selecting `supersedes_reason`, which does not exist, so three checks read an empty list as an empty
+database; and a `networkidle` navigation capped at 20s that reported a layout failure for a page it
+had never managed to load.
+
 ### Not done in Phase 6
 
-* **The Anthropic provider is not connected.** See the setup below.
-* **Relationship suggestions are accepted and confirmable, but nothing proposes them.** The
-  deterministic provider does not, for the reason above. The path is built and tested; a model
-  provider is what would populate it.
+* **Relationship suggestions are accepted and confirmable, but nothing proposes them.** Neither
+  provider does. The deterministic one cannot, for the reason above; the model provider is only
+  allowed to relate records whose ids appear in the bounded existing context, and in practice
+  returns none. The path is built and tested but unexercised in anger.
 * **Duplicate linking is a warning, not an action.** Review shows "possible existing record" and
   leaves the choice; there is no "link to existing" button yet, so the honest options today are
   keep-as-new or deselect.
-* **Cost display shows tokens, not currency.** No pricing table is configured, and an estimate
-  nobody can reproduce is worse than no number.
+* **Cost display shows tokens, not currency.** Real input and output counts are recorded per run
+  and shown in Settings; `cost_usd` is never written. No pricing table is configured, and an
+  estimate nobody can reproduce is worse than no number.
+* **Extraction is not reproducible run to run.** `temperature` is refused by current models, so the
+  same source can yield a different set of suggestions on a second analysis — usually 5–8 records
+  from the validation source. The review is what makes this safe; nothing is filed unreviewed.
+* **One analysis is one synchronous request.** A large source chunks and runs sequentially, and a
+  live run against the validation source takes roughly 30–45 seconds. There is no background queue.
 
-### The one-time setup that would enable AI-assisted extraction
+### The setup that enables AI-assisted extraction
 
-Set in Vercel **production**, server-side only:
+Set in Vercel, server-side only — never in a client bundle, git, `CLAUDE.md`, or a log:
 
 ```
-ANTHROPIC_API_KEY=sk-ant-…              the API key
+ANTHROPIC_API_KEY=sk-ant-…              the API key       (Sensitive; never rendered anywhere)
 CONTEXTSHELF_EXTRACTION_MODEL=…         the model identifier
 ```
 
 **Both are required**, and there is no built-in default model. A default would be a claim that some
-particular model had been chosen and validated for this task, and none has — so the provider reports
-`CONTEXTSHELF_EXTRACTION_MODEL is not set` rather than substituting one. Pick a current Claude model
-identifier from Anthropic's own model list at the time you configure it; the choice is a
-recommendation to make, not a value this code assumes.
+particular model had been chosen and validated for this task — so the provider reports
+`CONTEXTSHELF_EXTRACTION_MODEL is not set` rather than substituting one.
+
+**The validated model is `claude-sonnet-5`.** That is the identifier the live validation ran
+against, and the one production is configured with. Any other current Claude model identifier
+should work; only this one has been exercised end to end.
+
+`ANTHROPIC_API_KEY` is scoped Preview + Production. `SUPABASE_SECRET_KEY` is **Production only**,
+which is why a preview deployment answers `503` from `/api/ingest` — a correct refusal, not a
+defect, and the reason the live validator reports that section as skipped rather than passed when
+run against a preview.
 
 Nothing goes in the client bundle, in git, in `CLAUDE.md`, or in any log. There is deliberately no
 place in the app to paste a key: storing one per user would mean encrypting it at rest, which
@@ -756,25 +799,31 @@ Phase 1's criteria all pass. These are honest gaps in *coverage*, not open crite
 | `npm run build` | pass — 22 routes |
 | `npm run typecheck` | pass |
 | `npm run lint` | pass, 0 warnings |
-| `npm run test` | **265 passed** / 16 files |
+| `npm run test` | **295 passed** / 18 files |
 | `npm run test:db` | **9 suites passed** against PostgreSQL 16.13, plus both hosted-script smoke tests |
 | `npm run schema:parity` | columns 392, enums 17, RLS 29, policies 38, indexes 112, constraints 174, triggers 21, functions 20 — all matching |
 | `hosted/01_verify_schema.sql` | **34/34 PASS** against `omhktzxwffaipmcoljic` |
 | `hosted/02_rls_isolation.sql` | **ALL HOSTED RLS CHECKS PASSED**, rolled back |
-| `npm run validate:hosted` | **128/128 checks pass** |
-| Authenticated responsive QA | **105 combinations, 0 skipped, no layout failures** — now including the review workspace |
+| `npm run validate:hosted` | **127/127 checks pass** |
+| `npm run validate:provider` | **69/69 checks pass against production**, 0 skipped — one live `claude-sonnet-5` request per run |
+| Authenticated responsive QA | **105 combinations, 0 skipped, no layout failures** — including the review workspace |
 | Cross-device acceptance test | **PASS** — Work PC ↔ Mac, both directions, by the account holder |
 
-Hosted data after validation: one workspace, one user, and the account holder's own
-`Cross-device test from Work PC` topic. Every QA account, topic and row the validator creates is
-deleted by its own cleanup — `context_snapshots`, `knowledge_entries`, `source_sessions` and
-`ingestion_records` are all empty.
+`validate:provider` is a separate script from `validate:hosted` on purpose. The hosted suite must
+keep passing with no key configured at all, so the checks that require a live provider cannot live
+there without making a paid dependency mandatory for validation.
+
+Hosted data after validation: one workspace, one user, and the account holder's own two topics.
+Every QA account, topic and row the validators create is deleted by their own cleanup —
+`knowledge_entries`, `decisions`, `ideas`, `prompts`, `actions`, `source_sessions`,
+`ingestion_records`, `extraction_runs`, `extraction_suggestions`, `ingestion_tokens`,
+`context_snapshots` and `file_references` are all empty.
 
 ---
 
 ## Next task
 
-**Connect the Anthropic provider**, if and when the account holder decides to. Everything else in
+**Phase 7**, if and when the account holder decides to. Everything else in
 Phase 6 is finished; the exact one-time setup is in the Phase 6 section above, and the remaining
 validation is listed there too.
 
