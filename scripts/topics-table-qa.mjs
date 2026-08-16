@@ -46,8 +46,14 @@ const record = (name, ok, detail = '') => {
 };
 const heading = (t) => console.log(`\n\x1b[1m${t}\x1b[0m`);
 
+// A Vercel preview sits behind Deployment Protection; the automation bypass
+// header is how a QA run reaches it. Absent, this is a no-op and the run works
+// unchanged against a local server.
+const BYPASS = process.env.CONTEXTSHELF_BYPASS;
+const extraHTTPHeaders = BYPASS ? { 'x-vercel-protection-bypass': BYPASS } : undefined;
+
 const browser = await chromium.launch(launchOptions());
-const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, extraHTTPHeaders });
 const page = await ctx.newPage();
 
 const { data: link } = await admin.auth.admin.generateLink({ type: 'magiclink', email: OWNER });
@@ -107,7 +113,7 @@ const geometry = (p) =>
 // ---------------------------------------------------------------------------
 heading('A. Desktop table structure and alignment');
 for (const vp of DESKTOP) {
-  const c = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
+  const c = await browser.newContext({ viewport: { width: vp.width, height: vp.height }, extraHTTPHeaders });
   await c.addCookies(cookies);
   const p = await c.newPage();
   await p.goto(`${BASE}/topics?view=table`, { waitUntil: 'networkidle' });
@@ -198,6 +204,7 @@ for (const vp of SMALL) {
     viewport: { width: vp.width, height: vp.height },
     isMobile: vp.width <= 430,
     hasTouch: vp.width <= 768,
+    extraHTTPHeaders,
   });
   await c.addCookies(cookies);
   const p = await c.newPage();
@@ -231,7 +238,7 @@ for (const vp of SMALL) {
 // ---------------------------------------------------------------------------
 heading('C. Behaviour');
 {
-  const c = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const c = await browser.newContext({ viewport: { width: 1440, height: 900 }, extraHTTPHeaders });
   await c.addCookies(cookies);
   const p = await c.newPage();
 
