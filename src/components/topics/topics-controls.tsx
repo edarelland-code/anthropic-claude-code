@@ -83,7 +83,7 @@ export function TopicsControls({ view }: { view: 'cards' | 'table' }) {
               defaultValue={params.get('q') ?? ''}
               placeholder="Search topics"
               aria-label="Search topics"
-              className="w-full rounded-md py-2 pl-8 pr-2.5 text-sm hairline bg-transparent"
+              className="min-h-10 w-full rounded-md py-2.5 pl-8 pr-2.5 text-sm hairline bg-transparent"
             />
           </form>
 
@@ -92,7 +92,7 @@ export function TopicsControls({ view }: { view: 'cards' | 'table' }) {
             <select
               value={params.get('status') ?? 'all'}
               onChange={onSelect('status')}
-              className="rounded-md px-2.5 py-2 text-sm hairline bg-transparent"
+              className="min-h-10 rounded-md px-2.5 py-2 text-sm hairline bg-transparent"
             >
               <option value="all">All statuses</option>
               {BOARD_SECTIONS.map((s) => (
@@ -108,7 +108,7 @@ export function TopicsControls({ view }: { view: 'cards' | 'table' }) {
             <select
               value={params.get('sort') ?? 'activity'}
               onChange={onSelect('sort')}
-              className="rounded-md px-2.5 py-2 text-sm hairline bg-transparent"
+              className="min-h-10 rounded-md px-2.5 py-2 text-sm hairline bg-transparent"
             >
               {SORTS.map((s) => (
                 <option key={s.value} value={s.value}>
@@ -139,7 +139,9 @@ function Toggle({
       href={href}
       aria-current={active ? 'true' : undefined}
       className={cn(
-        'inline-flex items-center gap-1.5 rounded px-2.5 py-1.5 text-sm font-medium transition-colors',
+        // py-2.5 gets the tap target to 40px on a phone: 20px line-height plus
+        // 10px each side. py-1.5 measured 32 and py-2 measured 36.
+        'inline-flex items-center gap-1.5 rounded px-2.5 py-2.5 text-sm font-medium transition-colors',
         active ? 'bg-indigo-600 text-white' : 'muted hover:text-slate-900 dark:hover:text-slate-100',
       )}
     >

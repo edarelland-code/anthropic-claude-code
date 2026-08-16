@@ -64,13 +64,16 @@ function Row({ row }: { row: BoardRow }) {
   return (
     <tr className="border-b align-top last:border-0 hairline hover:bg-slate-50 dark:hover:bg-slate-800/40">
       <td className="px-3 py-2.5 align-top text-sm">
+        {/* Clamped like the narrative cells. Left free it was the only
+            unclamped cell in the row, so a long idea title at a 129px column
+            width set the height of the whole row — measured at 351px. */}
         <Link
           href={row.href}
-          className="font-medium text-indigo-700 underline-offset-2 hover:underline focus-visible:underline dark:text-indigo-300"
+          className="line-clamp-3 font-medium text-indigo-700 underline-offset-2 hover:underline focus-visible:underline dark:text-indigo-300"
         >
           {row.project}
         </Link>
-        {row.context && <span className="mt-0.5 block text-xs muted">in {row.context}</span>}
+        {row.context && <span className="mt-0.5 line-clamp-2 block text-xs muted">in {row.context}</span>}
       </td>
       <Cell value={row.what} narrative />
       <Cell value={row.state} narrative />

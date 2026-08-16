@@ -82,11 +82,16 @@ function TableView({
   return (
     <>
       {/* Both render server-side; the media query picks one, so there is no
-          viewport measurement and no flash of the wrong layout. */}
-      <div className="hidden lg:block">
+          viewport measurement and no flash of the wrong layout. The table
+          switches at an explicit 1200px rather than a named breakpoint: `xl` is
+          exactly 1280, and a classic scrollbar puts the CSS viewport a few
+          pixels under that, so a 1280-wide window fell to the card layout.
+          1200 clears 1280 comfortably and still leaves a 1024 tablet on cards,
+          where seven columns would be too compressed to read. */}
+      <div className="hidden min-[1200px]:block">
         <TopicsTable sections={sections} />
       </div>
-      <div className="lg:hidden">
+      <div className="min-[1200px]:hidden">
         <TopicsBoardCards sections={sections} />
       </div>
     </>
