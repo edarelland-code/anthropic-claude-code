@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 import type {
   Action,
+  BoardIdea,
   ConflictProposal,
   ContextDensity,
   Decision,
@@ -197,14 +198,22 @@ class SupabaseTopics implements TopicRepository {
         this.db.from('source_sessions').select('id, topic_id, source_type').in('topic_id', ids),
         this.db.from('prompts').select('id, topic_id').in('topic_id', ids).is('deleted_at', null),
         this.db.from('decisions').select('id, topic_id').in('topic_id', ids).is('deleted_at', null),
-        this.db.from('ideas').select('id, topic_id').in('topic_id', ids).is('deleted_at', null),
+        this.db
+          .from('ideas')
+          .select('id, topic_id, title, idea, rationale, status, updated_at')
+          .in('topic_id', ids)
+          .is('deleted_at', null)
+          .order('updated_at', { ascending: false }),
         this.db.from('file_references').select('id, topic_id').in('topic_id', ids).is('deleted_at', null),
+        // Every status, not just the open ones: the table view needs done
+        // actions for "what appears completed". The open-only semantics the
+        // card view depends on are preserved by filtering in memory below, so
+        // this stays one round trip rather than two.
         this.db
           .from('actions')
           .select('id, topic_id, title, kind, status, position')
           .in('topic_id', ids)
           .is('deleted_at', null)
-          .in('status', ['open', 'in_progress', 'blocked'])
           .order('position'),
       ]);
 
@@ -228,7 +237,9 @@ class SupabaseTopics implements TopicRepository {
     const cDecisions = countBy((decisions.data ?? []) as Row[]);
     const cIdeas = countBy((ideas.data ?? []) as Row[]);
     const cFiles = countBy((files.data ?? []) as Row[]);
-    const cActions = countBy(actionRows);
+    const OPEN = new Set(['open', 'in_progress', 'blocked']);
+    const openActionRows = actionRows.filter((r) => OPEN.has(String(r.status)));
+    const cActions = countBy(openActionRows);
 
     const latestByTopic = new Map<string, Row>();
     for (const r of entryRows) {
@@ -237,9 +248,42 @@ class SupabaseTopics implements TopicRepository {
     }
 
     const nextByTopic = new Map<string, Row>();
-    for (const r of actionRows) {
+    for (const r of openActionRows) {
       const k = String(r.topic_id);
       if (r.kind === 'next_step' && !nextByTopic.has(k)) nextByTopic.set(k, r);
+    }
+
+    // Structured evidence for the table view's narrative columns. Titles only.
+    const completedByTopic = new Map<string, string[]>();
+    const unfinishedByTopic = new Map<string, string[]>();
+    const push = (m: Map<string, string[]>, k: string, title: unknown) => {
+      if (typeof title !== 'string' || !title.trim()) return;
+      const list = m.get(k) ?? [];
+      list.push(title);
+      m.set(k, list);
+    };
+    for (const r of actionRows) {
+      const k = String(r.topic_id);
+      if (String(r.status) === 'done') push(completedByTopic, k, r.title);
+      else if (OPEN.has(String(r.status))) push(unfinishedByTopic, k, r.title);
+    }
+    for (const r of entryRows) {
+      if (r.knowledge_type === 'implementation') push(completedByTopic, String(r.topic_id), r.title);
+    }
+
+    const ideasByTopic = new Map<string, BoardIdea[]>();
+    for (const r of (ideas.data ?? []) as Row[]) {
+      const k = String(r.topic_id);
+      const list = ideasByTopic.get(k) ?? [];
+      list.push({
+        id: String(r.id),
+        title: String(r.title),
+        body: (r.idea as string | null) ?? null,
+        rationale: (r.rationale as string | null) ?? null,
+        status: r.status as BoardIdea['status'],
+        updatedAt: String(r.updated_at),
+      });
+      ideasByTopic.set(k, list);
     }
 
     const sourcesByTopic = new Map<string, Set<SourceType>>();
@@ -278,6 +322,11 @@ class SupabaseTopics implements TopicRepository {
         nextAction: next
           ? { id: String(next.id), title: String(next.title), kind: next.kind as Action['kind'] }
           : null,
+        board: {
+          completed: completedByTopic.get(topic.id) ?? [],
+          unfinished: unfinishedByTopic.get(topic.id) ?? [],
+          ideas: ideasByTopic.get(topic.id) ?? [],
+        },
       };
     });
   }

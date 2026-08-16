@@ -494,6 +494,30 @@ export interface TopicCounts {
   openActions: number;
 }
 
+/** An idea as the Topics table needs it — enough to render one row. */
+export interface BoardIdea {
+  id: string;
+  title: string;
+  body: string | null;
+  rationale: string | null;
+  status: IdeaStatus;
+  updatedAt: string;
+}
+
+/**
+ * The extra structured evidence the Topics table view reads.
+ *
+ * Titles only, and only from records that explicitly establish what they claim:
+ * `completed` from done actions and implementation entries, `unfinished` from
+ * unresolved actions. Nothing here is derived from prose, so the table can
+ * never assert something the rows do not.
+ */
+export interface TopicBoardFacts {
+  completed: string[];
+  unfinished: string[];
+  ideas: BoardIdea[];
+}
+
 export interface TopicSummary {
   topic: Topic;
   counts: TopicCounts;
@@ -501,6 +525,8 @@ export interface TopicSummary {
   sourceTypes: SourceType[];
   latestChange: Pick<KnowledgeEntry, 'id' | 'title' | 'knowledgeType' | 'occurredAt'> | null;
   nextAction: Pick<Action, 'id' | 'title' | 'kind'> | null;
+  /** Read by the table view; the card view ignores it. */
+  board: TopicBoardFacts;
 }
 
 /** Everything the Topic page and the Resume assembler need, in one read. */
