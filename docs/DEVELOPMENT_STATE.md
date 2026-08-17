@@ -852,6 +852,68 @@ date. Two of those checks failed first for the wrong reason and were fixed rathe
 that rule 11a strips — so "the largest body survived" had to be computed from the largest
 *imported* body, normalised.
 
+### Pass 2 — corrections and missing projects, 2026-08-17
+
+3 topics created, 2 corrected, 15 Layer 1 records, 16 Layer 2 entries. **27/27 checks.**
+
+**A phrase count is not evidence of a project.** Pass 2 began by taking two claims from the
+discovery report at face value and found that one of them could not survive being checked. The
+per-conversation match counts in that report were computed with `String.match` and a **non-global**
+regex, which returns the first match plus its capture groups — so the count printed `1` for every
+conversation regardless of the truth, and "39 conversations, one mention each" read as boilerplate
+riding inside proposal drafts. Re-measured with a global regex, Castaldi Live has **654 mentions
+across 39 conversations, 59 of them typed by the owner**. Both the original record ("almost nothing
+is known") and the correction drafted from the broken count were wrong.
+
+The test that separates a subject from a signature is not the number of conversations. It is
+whether the phrase appears in **many different sentences**, whether any conversation is **titled**
+for it, and whether the **owner** ever writes it rather than only the assistant inside drafted copy.
+PBC Services passes all three — 319 conversations, 35 titled, threads over 1,700 messages.
+Castaldi Live passes the third and fails the second, which is itself the finding.
+
+| Topic | What the archive settles | What it does not |
+|---|---|---|
+| **Castaldi Live** | A GC-facing project-visibility platform — real-time visibility into production, shop drawings, approvals and delivery, paired with BIM + Microvellum and a "Schedule a Visit \| Experience Castaldi Live" call to action. Named by the owner on 2025-09-02 as "the new name for project visibility". 2025-09-02 → 2026-07-01 | Whether it is software this project built, a vendor product, or a name for a capability that already existed. **No conversation is titled for it and none is about building it** — every appearance is inside copy written to win a bid |
+| **PBC Services Automation** | The largest body of work in the archive: 319 conversations, 35 titled, 2023-10-19 → **2026-08-13**, four days before this pass. The earlier "not established as currently active" is now superseded by evidence as well as by the owner | — |
+
+Three topics were created, not the five the owner listed, because two of the five are not separate
+projects on the evidence:
+
+- **wellena.shop** — a Shopify dropshipping store for sofa covers and self-care products,
+  2023-09-28 → 2023-11-17. **`nolaninterior.com` is absorbed into it as supplier research**: it is
+  not a site the owner holds, it is a *supplier* of magic sofa covers that was researched for
+  dropshipping and had its SEO analysed. No sale is evidenced — the one order-confirmation email is
+  a template full of placeholders.
+- **Otro Jalecito** — a merch store for a TikTok influencer, selling tees printed with his
+  catchphrases. Two conversations, 2023-10-31 → 2023-11-02.
+- **Hat & Apparel Designs (Gym Dads · Iron Dads · Agave)** — one line, not three, on the evidence of
+  a checklist reading `Simple, Clean, Minimalist Hat Designs - Gym Dads, Iron Dads, Agave - 90's
+  Feel`. **Agave hat is absorbed here.** Iron Dads is named but has no conversation of its own.
+
+Two conventions this pass established, both worth keeping:
+
+- **Layer 1 is verbatim or it is nothing — and an extract says so in its title.** Where a whole
+  conversation belongs to the topic, the whole conversation is stored. Where the evidence is
+  scattered across threads belonging to *other* topics, the record stores the verbatim lines
+  themselves, each labelled with the conversation it came from, and is titled `verbatim extract` /
+  `verbatim index`. Filing a 513-message proposal thread under "Castaldi Live" because it mentions
+  Castaldi Live would have put the evidence in the wrong topic. Extracts also carry no
+  `external_url`, because they are not a conversation.
+- **Layer 2 is the opening request, verbatim.** Each `research` entry holds the first message of its
+  thread exactly as typed. Summarising the conversation would be the migration deciding what the
+  conversation meant (rule 17b).
+
+Current State was **appended to, never replaced** — the Castaldi Live record still carries its own
+"has not yet been verified against conversations.json" note above the correction that answers it,
+and the PBC record still carries the owner's 2026-08-15 confirmation. The update uses optimistic
+concurrency (rule 16): a competing write makes it zero rows and raises, rather than clobbering.
+Freshness clocks were set to each topic's **real last activity** — 2023-11-17, 2023-11-02,
+2025-03-05 — not the import date.
+
+Pass 2 created **no decision and no idea**, asserted by querying for records carrying its source
+type rather than by trusting the script. One verification check was rewritten mid-pass because it
+compared a list to itself and therefore could not fail (AD-25).
+
 ---
 
 ## Test results (last run, 2026-08-14, end of Phase 5)
