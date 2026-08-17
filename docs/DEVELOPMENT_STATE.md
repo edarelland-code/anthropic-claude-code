@@ -792,6 +792,68 @@ Phase 1's criteria all pass. These are honest gaps in *coverage*, not open crite
 
 ---
 
+## Historical data migration
+
+The workspace's memory was populated in passes, each from a different source. Source hierarchy,
+strongest first: an original ChatGPT conversation transcript from the official export, then the
+`PROJECT HQ` structured recovery export, then an installed skill definition file inspected
+directly. Nothing was ever written from recollection.
+
+| Pass | Source | Adapter id | What it produced |
+|---|---|---|---|
+| Second migration | reconstructed project notes | `manual-migration` | 9 topics with Current State, decisions, actions |
+| Skill correction | installed Castaldi skill definition files | `manual-skill-inspection` | 20 Layer 1 records; corrections where a skill contradicted a migrated Current State |
+| PROJECT HQ | `PROJECT HQ` structured recovery export | `project-hq-recovery` | 51 Layer 1 documents, 441 entries, 61 decisions, 81 ideas, 209 actions |
+| **Prompt recovery (Pass 1)** | **ChatGPT export, 14 shards, 1,381 conversations** | **`chatgpt-export`** | **65 prompts, 89 versions, 64 Layer 1 transcripts, 89 Layer 2 entries** |
+
+### Pass 1 — prompt recovery, 2026-08-17
+
+548 user messages in the archive were long enough to be prompts and carried at least one prompt
+marker. Four gates narrowed that to 89 bodies across 65 artifacts: a weighted signal score, a
+requirement that the message *be* the prompt rather than a request about one, exact-duplicate
+collapse, and an individual read of each survivor.
+
+Refused, by name and for the record: 36 wrapper-framed bodies (`improve my prompt: <body>` —
+extracting the body means guessing where the wrapper ends, so they were held rather than guessed);
+10 AIPRM marketplace templates from the 2023 job-hunt period, which were not authored here; and 7
+individually — one pasted transcript, one "continue where you left off" instruction, one 2023
+cover-letter rewrite, and four personal rather than business, per the owner's standing call to
+ignore personal admin.
+
+What the pass establishes, beyond the prompts themselves:
+
+- **First true tier-1 provenance.** Every prior Layer 1 row is `source_type = 'manual'`, correctly,
+  because a recovery export is not a transcript. These 64 are `imported_transcript`, carrying the
+  real conversation id, title, `create_time` and full text, with a `chatgpt.com/c/<id>` URL.
+- **Version chains are real history, not a numbering scheme.** 12 artifacts carry more than one
+  version, ordered by the originating conversation's `create_time` — including
+  `Caleb — Scope-Only Estimating Master Prompt (No Rates)` v3.5 → v3.8 across two conversations a
+  day apart, and `SYSTEM PROMPT — ESTIMATOR` v1.2 → v1.3.
+- **Authority was not taken.** Every version is `untested`, an outcome row is seeded for each so
+  `prompt_version_current_outcome` is complete (AD-18), and nothing was written to `is_winning` or
+  `prompt_winning_selections`. The archive states no outcome, so none was recorded.
+- **A prompt that already existed gained a version, not a twin.** `Marketplace Flipping Assistant`
+  arrived via PROJECT HQ; the archive holds an earlier variant of the same artifact. Because
+  `prompt_versions` is insert-only and numbered on append, the older text is v2. The version note
+  records the real date so the ordering stays recoverable even though the numbering cannot express
+  it.
+- **A migration cannot call `persist_ingestion`.** The function is `SECURITY INVOKER` and takes
+  every `user_id` from `auth.uid()`, which is null for a server key. The pass replicates its write
+  order step for step with the owner supplied explicitly — with one deliberate omission: the
+  function stamps `last_meaningful_update_at = now()` on the receiving topic, and importing a
+  prompt typed in 2025 is not activity today. Ten topics reading "Today" would have falsified the
+  Topics table (AD-10), so the stamp was omitted rather than performed and undone.
+
+Verified in the database, not on a page (AD-16): **27/27 checks**, covering counts, chain density
+and ordering, byte-for-byte body equality against the archive, Layer 1/Layer 2 linkage on every
+version, seeded outcomes, zero winning selections, and no topic reporting activity on the import
+date. Two of those checks failed first for the wrong reason and were fixed rather than accepted
+(AD-25): the longest archive body belongs to a *refused* family, and the raw message holds CRLF
+that rule 11a strips — so "the largest body survived" had to be computed from the largest
+*imported* body, normalised.
+
+---
+
 ## Test results (last run, 2026-08-14, end of Phase 5)
 
 | Suite | Result |
