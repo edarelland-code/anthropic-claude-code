@@ -25,6 +25,7 @@
     "contextshelf:install-hook": "node scripts/install-session-hook.mjs"
   },
   "dependencies": {
+    "@modelcontextprotocol/server": "^2.4.0",
     "@supabase/ssr": "^0.12.4",
     "@supabase/supabase-js": "^2.45.4",
     "clsx": "^2.1.1",
