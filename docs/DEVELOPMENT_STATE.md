@@ -821,6 +821,55 @@ Every QA account, topic and row the validators create is deleted by their own cl
 
 ---
 
+## Automatic capture — corrected record (2026-11-27)
+
+The account holder reported ContextShelf as "not syncing, outdated for the last 3 months." It was
+neither. The deployment, the Supabase project and `/api/ingest` were all verified healthy that
+day; dynamic pages return `no-store`, the project was not paused, and the endpoint authenticated
+correctly. **Nothing had fed the shelf since 2026-08-16.**
+
+Two causes, and the first is a documentation failure worth naming plainly:
+
+1. **Phase 6 was rescoped, and the record read as finished.** The original brief's Phase 6 was
+   *"Automation: browser companion architecture · Claude Chat ingestion options · Cowork ingestion
+   options · automated topic classification · duplicate detection · conflict detection · suggested
+   summaries."* What shipped under the name Phase 6 was *"Assisted ingestion"* — extraction
+   suggestions, bulk review, correction, batch confirmation. The browser companion and the
+   Chat/Cowork ingestion options were moved into a single sentence in "Next task" and the phase was
+   marked ✅ Met, leaving "Phases 1–6 are closed and merged" to imply the automation goal had been
+   delivered. It had not. That violates the rule against presenting a placeholder as a complete
+   feature, and the user was right to be confused.
+2. **The one automatic path that existed was never switched on.** Phase 5 built real automatic
+   Claude Code delivery, but shipped it opt-in, where the opt-in was hand-editing
+   `~/.claude/settings.json`. That edit never happened on either machine, so no session ever
+   reported in.
+
+### Fixed in this pass
+
+* **`scripts/contextshelf-session-end.mjs` now reports the repository the session ran in.** It
+  pinned git to the script's own checkout, so registered at user level it would have described
+  ContextShelf's repository for every session in every other project — confidently and silently
+  wrong. It now resolves `CLAUDE_PROJECT_DIR`, then the stdin payload's `cwd`, then the checkout.
+  Verified against a stand-in repository: the delivery carries that repository's branch, commit
+  and files.
+* **A bug introduced while making that change, caught by testing it.** `REPO` was declared after
+  the first `git()` call; the temporal-dead-zone throw was swallowed by `git()`'s own catch and the
+  hook exited silently. Moved above first use, with a comment saying why the order matters.
+* **`.claude/settings.json`** registers the hook for this repository.
+* **`scripts/install-session-hook.mjs`** (`npm run contextshelf:install-hook`) registers it at user
+  level so every project is covered. Additive, idempotent, backs up first, `--uninstall` reverses
+  exactly what it added, `--check` reports without changing anything. The token is never handled:
+  the installer stores only the path to a file the user creates. Verified against a throwaway HOME
+  across install, re-install, status and uninstall.
+
+### Still not automatic
+
+**Claude Chat and Cowork.** R2 holds: no supported export or API exists, so this needs a browser
+companion, which is not built. Those sources still require pasting into the Inbox. Nothing in the
+UI claims otherwise.
+
+---
+
 ## Next task
 
 **Phase 7**, if and when the account holder decides to. Everything else in

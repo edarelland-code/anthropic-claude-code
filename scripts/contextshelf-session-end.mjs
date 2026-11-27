@@ -52,6 +52,23 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
+/**
+ * The repository this session actually worked in — not the one holding this
+ * script.
+ *
+ * `ROOT` is where the script lives, which is only the right answer when the
+ * hook is registered inside ContextShelf itself. Registered once at user level
+ * (`~/.claude/settings.json`) so every project reports in, a ROOT-pinned git
+ * call would describe ContextShelf's own repository for every session in every
+ * other project — silently, and a memory system that files confident wrong
+ * facts is worse than one that files none.
+ *
+ * Claude Code sets CLAUDE_PROJECT_DIR for the session; the stdin payload's
+ * `cwd` is the fallback, and ROOT the last resort so behaviour inside this
+ * repository is unchanged.
+ */
+let projectDir = (process.env.CLAUDE_PROJECT_DIR ?? '').trim() || null;
+
 /** Always. Whatever happened, the session ends cleanly. */
 const done = (message) => {
   if (message) console.log(`[contextshelf] ${message}`);
@@ -73,16 +90,30 @@ try {
   reason =
     flagged >= 0
       ? (process.argv[flagged + 1] ?? '')
-      : (JSON.parse(readFileSync(0, 'utf8') || '{}').reason ?? '');
+      : (() => {
+          const payload = JSON.parse(readFileSync(0, 'utf8') || '{}');
+          if (!projectDir && typeof payload.cwd === 'string' && payload.cwd.trim()) {
+            projectDir = payload.cwd.trim();
+          }
+          return payload.reason ?? '';
+        })();
 } catch {
   // No payload, or not JSON. Neither is a reason to skip the sync.
 }
 if (reason === 'clear') done();
 
+/**
+ * Resolved here, after stdin has been read so the payload's `cwd` can
+ * contribute, and before the first `git()` call below — a `const` referenced
+ * ahead of its initialiser throws, and `git()` swallows throws, so getting this
+ * order wrong makes the hook exit silently rather than loudly.
+ */
+const REPO = projectDir ?? ROOT;
+
 function git(...args) {
   try {
     return execFileSync('git', args, {
-      cwd: ROOT,
+      cwd: REPO,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
@@ -93,6 +124,7 @@ function git(...args) {
 
 if (!git('rev-parse', '--is-inside-work-tree')) done();
 
+
 // Nothing changed: no commit since the previous one and no working-tree edits.
 // A session spent reading is not a session worth a delivery.
 const changed = git('diff', '--name-only', 'HEAD~1', 'HEAD') || git('diff', '--name-only');
@@ -102,7 +134,10 @@ const result = spawnSync(
   process.execPath,
   [resolve(ROOT, 'scripts/contextshelf-sync.mjs'), '--title', git('log', '-1', '--pretty=%s')],
   {
-    cwd: ROOT,
+    // The script is located via ROOT; the repository it describes is REPO.
+    // contextshelf-sync.mjs runs git with no explicit cwd, so the working
+    // directory it inherits is the repository it reports on.
+    cwd: REPO,
     encoding: 'utf8',
     // Bounded so a hanging network call cannot sit at the end of a session.
     timeout: 20_000,

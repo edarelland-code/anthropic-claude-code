@@ -21,7 +21,8 @@
     "validate:hosted": "node scripts/validate-hosted.mjs",
     "validate:provider": "node scripts/validate-provider.mjs",
     "schema:parity": "node scripts/schema-parity.mjs",
-    "verify:hosted": "node scripts/verify-hosted.mjs"
+    "verify:hosted": "node scripts/verify-hosted.mjs",
+    "contextshelf:install-hook": "node scripts/install-session-hook.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.4",

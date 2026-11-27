@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node scripts/contextshelf-session-end.mjs"
+          }
+        ]
+      }
+    ]
+  }
+}
