@@ -395,6 +395,66 @@ those run through the Supabase SQL Editor or the CLI regardless of operating sys
 Everything else — `npm run build`, `typecheck`, `lint`, `test`, `test:responsive`, the whole
 `supabase` CLI sequence, and the Vercel CLI — works identically on Windows.
 
+## Turning on automatic capture from Claude Code
+
+ContextShelf does not fill itself until something feeds it. The `SessionEnd` hook is that
+something, and it ships **opt-in** — it has to be registered once per machine.
+
+```
+npm run contextshelf:install-hook -- --check                          # status, changes nothing
+npm run contextshelf:install-hook -- --token-file ~/.contextshelf-token
+npm run contextshelf:install-hook -- --uninstall
+```
+
+**The one manual step** is the token, because only the account holder can create it:
+`<deployment>/settings` → **Claude Code** → name the machine → create → copy. Then save it to a
+file outside any repository:
+
+```powershell
+# Windows PowerShell
+Set-Content -Path "$HOME\.contextshelf-token" -Value "<paste>" -NoNewline
+```
+```bash
+# macOS / Linux
+printf %s "<paste>" > ~/.contextshelf-token && chmod 600 ~/.contextshelf-token
+```
+
+The installer records only the *path*. The token never enters this repository, a settings file
+that syncs, or shell history.
+
+### What it registers, and where
+
+| Scope | File | Covers |
+|---|---|---|
+| **This repository** | `.claude/settings.json` (checked in) | Claude Code sessions on ContextShelf itself |
+| **Every repository** | `~/.claude/settings.json` (per machine, written by the installer) | every project you open Claude Code in |
+
+The installer is additive and idempotent: it backs the file up first, preserves unrelated hooks
+and env values, writes one entry no matter how many times it runs, and `--uninstall` removes
+exactly what it added.
+
+### What it does and does not capture
+
+It delivers once per session, when the session ends and something actually changed: repository,
+branch, commit, and files touched. A session that only read files sends nothing, so the Timeline
+does not fill with noise.
+
+It **cannot** know what you decided, what comes next, or whether tests passed — nothing observed
+those. Add them yourself at the end of a session:
+
+```
+npm run contextshelf:sync -- --done "…" --next "…" --tests "…"
+```
+
+Switch it off without unregistering: `CONTEXTSHELF_SYNC_ON_SESSION_END=0`.
+
+### Claude Chat and Cowork are not covered
+
+There is no supported export or API for Chat or Cowork conversations (risk R2 in
+`ARCHITECTURE.md` §14), so there is no automatic path for them. Today they go through the Inbox:
+paste a transcript, review the extracted suggestions, confirm. A browser companion is the route to
+automatic capture and is **not built** — see `DEVELOPMENT_STATE.md`.
+
 ## Which environment can do what
 
 Verified 2026-08-14, on a Claude Code web session whose network policy permits HTTPS to the
